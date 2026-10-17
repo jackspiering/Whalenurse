@@ -1,7 +1,15 @@
-# whalenurse — implementation plan v3.3
+# whalenurse — implementation plan v3.4
 
-Status: v3.3, approved for implementation. It is v3.2 plus the M0b verdicts ([m0b-findings.md](m0b-findings.md) §4), which the maintainer approved on 17 Oct 2026. v3.2 was v3.1 plus the two M1 verdicts ([m1-notes.md](m1-notes.md) decisions 2 and 11), and v3.1 was v3 plus the M0 verdicts ([m0-findings.md](m0-findings.md) §4). Supersedes v3.2. Facts and versions are as of 17 Oct 2026 (16 Oct for the prior-art survey).
+Status: v3.4, approved for implementation. It is v3.3 plus a split of milestone M2 into M2a and M2b (below). v3.3 was v3.2 plus the M0b verdicts ([m0b-findings.md](m0b-findings.md) §4), which the maintainer approved on 17 Oct 2026. v3.2 was v3.1 plus the two M1 verdicts ([m1-notes.md](m1-notes.md) decisions 2 and 11), and v3.1 was v3 plus the M0 verdicts ([m0-findings.md](m0-findings.md) §4). Supersedes v3.3. Facts and versions are as of 17 Oct 2026 (16 Oct for the prior-art survey).
 Repo: `github.com/jackspiering/whalenurse` (Go module path, GHCR image and binary are all lowercase).
+
+**Changes in v3.4** (a process change; no design rule changes):
+- §7: milestone M2 is split in two, because it bundled two different kinds of risk. Every M2 bullet is kept, each in exactly one of the two.
+  - **M2a** (state and control): CI on Docker Engine 29.x, the SQLite store, the full ladder with the crash-loop rule, the CLI over the control socket, the manual-stop markers, and shutdown handling. Rung 2 does not exist yet: where the ladder would recreate, it records "needs recreate (M2b)", as M1 does, and never restarts a dependent whose parent ID is gone.
+  - **M2b** (compose): `internal/compose`, the recreate rung, the drift guard with the startup version gate, dependents, and the rule-1 third-shape / image-drift-comparator bullet. The last bullet mixes rules work with the comparator; it stays whole in M2b, and the third shape is already pinned by the M0b fixtures (`testdata/inspect/m0b-daemon-restart-*`).
+- §0 order: H, M0, M1, M0b, **M2a, M2b**, M3 … M6.
+- §6: the integration list and the CI matrix say which milestone owns each item. M2a drives no compose binary (it only sets up test stacks), so it runs compose v5.6.0 on both image stores. The full compose matrix (v5.2.0, v5.6.0, latest) belongs to **M2b**, where whalenurse runs compose and the dry-run oracle's output has to be pinned across versions.
+- §3.2, §3.3, §4, §9: references to "M2" now name M2a (persistence, the crash-loop rule, the CLI, SQLite).
 
 **Changes in v3.3** (from the M0b review of PR #6; findings references are to [m0b-findings.md](m0b-findings.md) §4):
 - §3.3 *Manual-stop markers*: kills seen during a daemon shutdown or reboot must not set manual-stop markers or clear SUSPENDED. Three mechanisms are adopted: (a) quarantine on stream loss, (b) persist the boot id, (c) a restore window after reconnecting to a daemon that was down. A fourth, recognising a burst of `kill[15]`, is **rejected**: `docker compose stop` and `down` send the same burst, so deliberate stops would be healed. The reason is recorded in the section.
@@ -39,7 +47,7 @@ Repo: `github.com/jackspiering/whalenurse` (Go module path, GHCR image and binar
 
 ## 0. Instructions for Claude Code
 
-- **One milestone at a time, in order:** H, M0, M1, M0b, M2 … M6. At the end of each milestone, stop and report:
+- **One milestone at a time, in order:** H, M0, M1, M0b, M2a, M2b, M3 … M6. At the end of each milestone, stop and report:
   - what you built;
   - what you verified, and how;
   - what is still uncertain;
@@ -87,7 +95,7 @@ Prior art (checked 16 Oct 2026):
 | Compose binary (container mode) | **Host's compose plugin mounted `:ro` first; bundled copy as fallback** |
 | Docker Go client | `github.com/moby/moby/client` + `github.com/moby/moby/api` (`github.com/docker/docker` no longer gets updates as of Engine v29) |
 | Notifications | Shoutrrr; leaning `nicholas-fedor/shoutrrr` (vet in M3) |
-| Store | SQLite via `modernc.org/sqlite` (recommended in review; confirm at M2) |
+| Store | SQLite via `modernc.org/sqlite` (recommended in review; confirm at M2a) |
 | Dashboard | Read-only, off by default, built on a versioned JSON API; default port 8484 |
 | Control in v1 | CLI over a local unix socket (pause/resume/unsuspend/status). No network-exposed write endpoints |
 | Multi-server | Post-v1 hub (R1). v1 already carries a host ID in every key, event and API record |
@@ -122,7 +130,7 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 - **State key:** `host/project/service/container-number`, taken from the `com.docker.compose.project`, `.service` and `.container-number` labels. Never the container ID, because a recreate changes it.
   - `host` comes from `WHALENURSE_HOST_ID` (default: the hostname).
   - Non-compose containers fall back to the container name and only get rung 1.
-- **Persisted from M2:** incident state, rung reached, SUSPENDED/PAUSED (with reason and expiry), flap history and manual-stop markers.
+- **Persisted from M2a:** incident state, rung reached, SUSPENDED/PAUSED (with reason and expiry), flap history and manual-stop markers.
 - **Action-in-flight window:** while whalenurse is acting on a key, events for that key are *recorded and attributed to the action*, not interpreted. They must not:
   - trigger the manual-stop heuristic;
   - clear SUSPENDED;
@@ -181,7 +189,7 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 2. `running` + `unhealthy` → ladder.
 3. A **crash loop**, or `on-failure:N` exhausted → ladder. (A container still `restarting` after GRACE is re-inspected on each poll; rule 1 applies when it fails.) A container that was `created` but never started → recreate.
    - **Crash loop:** at least 3 `RestartCount` increases, the first at least `CRASHLOOP_AFTER` (default 5m) ago. `RestartCount` and `die` events are the signal, not the `restarting` status: the engine's restart manager resets its backoff after a run of 10s or more, so a container that crashes every ~15s is almost always `running` when inspected, and a rule that needs `restarting` never fires. The rule must give the same answer however often whalenurse inspects, so it counts increases between inspects rather than comparing two snapshots. The loop clears after `RECOVERY_PERIOD` (default 10m) without an increase.
-   - M1 ships a simpler form: the clock starts on `restarting` or a rising `RestartCount` and clears after GRACE of a steady count ([m1-notes.md](m1-notes.md) decision 11). M2 replaces it with the rule above.
+   - M1 ships a simpler form: the clock starts on `restarting` or a rising `RestartCount` and clears after GRACE of a steady count ([m1-notes.md](m1-notes.md) decision 11). M2a replaces it with the rule above.
 4. `exited` with no `State.Error` → apply `whalenurse.heal-exited` (`crashed` | `always` | `never`; default `crashed`):
    - **Intended exit:** with restart policy `no` or `on-failure` and exit code 0, the exit was intended. Leave it alone in `crashed` and `never` modes.
    - **`crashed`:** heal if whalenurse saw a `die` **without a preceding `kill`**, or `OOMKilled=true` (also watch the `oom` event). If whalenurse missed the events (it was down):
@@ -399,7 +407,7 @@ Initial defaults; tune them after M0.
 | `WHALENURSE_HOST_ID` | hostname |
 | `WHALENURSE_DATA_DIR` | `/data` |
 | `WHALENURSE_HTTP_ADDR` | empty (dashboard off; `:8484` in examples) |
-| `WHALENURSE_CONTROL_SOCKET` | `/run/whalenurse.sock` (unix socket for `/healthz` and, from M2, the CLI; added in M1) |
+| `WHALENURSE_CONTROL_SOCKET` | `/run/whalenurse.sock` (unix socket for `/healthz` and, from M2a, the CLI; added in M1) |
 | `WHALENURSE_HTTP_TOKEN` | — |
 | `WHALENURSE_HISTORY_RETENTION` | `30d` |
 | `WHALENURSE_HEARTBEAT_URL` | — |
@@ -476,17 +484,23 @@ internal/config/     env + label parsing
 - **Store:** state survives a restart; retention pruning.
 - **API:** golden JSON per endpoint (this is the future hub contract); dashboard pages render against a fixture store, with a test that env values never appear in output.
 
-**Integration tests** (CI, real Docker, projects `whalenurse-test-*` only):
-- toggled healthcheck → restart, then recreate, then SUSPENDED;
-- heal never pulls (a service with `pull_policy: always`);
-- the config-drift guard blocks a recreate after a compose edit;
-- the image-drift guard blocks a recreate after a re-tag, and does not block an unchanged container, on both image stores (the comparator of §3.6);
-- a ref-holding dependent skips the hash check and is recreated after its parent is;
-- notifications reach a local webhook receiver;
-- dry-run performs no actions;
-- the pull rung, against a local `registry:2`.
+**Integration tests** (CI, real Docker, projects `whalenurse-test-*` only). The tag says which milestone owns the test:
+- **M2a:** toggled healthcheck → restart, then "needs recreate (M2b)", then SUSPENDED (rung 2 does not exist yet);
+- **M2a:** state survives a whalenurse restart (SUSPENDED and the flap history are still there, and the ladder does not start over);
+- **M2a:** pause, resume and unsuspend over the control socket against a real daemon;
+- **M2a:** dry-run performs no actions;
+- **M2b:** toggled healthcheck → restart, then recreate, then SUSPENDED;
+- **M2b:** heal never pulls (a service with `pull_policy: always`);
+- **M2b:** the config-drift guard blocks a recreate after a compose edit;
+- **M2b:** the image-drift guard blocks a recreate after a re-tag, and does not block an unchanged container, on both image stores (the comparator of §3.6);
+- **M2b:** a ref-holding dependent skips the hash check and is recreated after its parent is;
+- **M3:** notifications reach a local webhook receiver;
+- **M4:** the pull rung, against a local `registry:2`.
 
-**CI matrix:** latest Docker Engine on both the classic and the containerd image store, crossed with three compose versions. The `image-drift` job (`test/m0/m0b/image-drift.sh`) runs on both stores today:
+**CI matrix:** latest Docker Engine on both the classic and the containerd image store, crossed with three compose versions. The `image-drift` job (`test/m0/m0b/image-drift.sh`) runs on both stores today.
+
+- **From M2a** the integration tests run on Engine 29.x with compose v5.6.0 on both stores, installed the way the `image-drift` job installs them (the runner's Engine 28.0.4 has no `image inspect --platform`, and its compose 2.38.2 prints `null` for the dry-run oracle). M2a does not drive compose: it uses compose only to set up test stacks, so the other two versions add nothing there.
+- **From M2b** the full compose matrix applies, because whalenurse then runs compose itself and the oracle's output and the config hash are what the matrix pins:
 - **v5.6.0**, the version M0 ran on;
 - **the latest release**, floating. It is v5.6.0 today, so the two jobs coincide until a newer release;
 - **v5.2.0**, the only release with compose bug #13878. v5.3.0 (2 Jul 2026) contains the fix, and v5.2.0 (23 Jun) is the only release before the fix (29 Jun). It exercises recreate-on-every-`up` for sidecars, config-hash and dry-run output across versions, and the version-skew check (§3.6).
@@ -539,7 +553,7 @@ internal/config/     env + label parsing
 - CI: build, vet, unit tests, integration test (unhealthy container gets restarted; dry-run does nothing).
 - **Done when:** the unit and integration tests pass, and `whalenurse run --dry-run` against a test stack logs the expected decisions.
 
-### M0b — Scenarios M0 could not run (no app code; after M1, must finish before M2)
+### M0b — Scenarios M0 could not run (no app code; after M1, must finish before M2a)
 
 M0 ran on a VM where the daemon could not be restarted and the journal was not readable (findings §6). M0b closes those gaps; its results and the proposed §3 changes are in [m0b-findings.md](m0b-findings.md). The scripts are in `test/m0/m0b/` (prepare, maintainer step, collect). It extends `test/m0` and `scripts/m0`; the safety rules of §0 apply unchanged, and it needs the maintainer's confirmation of the host.
 
@@ -553,17 +567,26 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 - **Done (17 Oct 2026):** the verdicts were approved and are in this plan as v3.3. The CI `image-drift` job (it installs Engine 29.x and compose 5.6.0, because the runner's Engine 28.0.4 has no `image inspect --platform`) and the M0b self-test are in `ci.yml`.
 - **Done when:** each item has an answer with scrubbed evidence in [m0b-findings.md](m0b-findings.md) (a separate file, not a section of `m0-findings.md`) and fixtures in `testdata/`, and §3.3, §3.5 and §3.6 are each marked "confirmed" or "needs change" for what M0b tested. Report anything that contradicts a plan rule before M2 starts.
 
-### M2 — Compose recreate, escalation and persistence
-- `internal/compose`: binary lookup (§3.4), command builder, the dry-run oracle with its `config --hash` fallback (§3.6).
+### M2a — State, the full ladder, the CLI and shutdown handling (no compose)
+
+Rung 2 does not exist yet. Where the ladder would recreate, it records "needs recreate (M2b)" as M1 does (a `RungUnavailable` event), and goes on to SUSPENDED. It still never API-restarts a dependent whose parent ID is gone.
+
+- CI: the integration tests run on Docker Engine 29.x with compose v5.6.0 on both image stores, installed the way the `image-drift` job installs them (§6, *CI matrix*).
 - The full ladder: cooldown backoff, recovery period, flap limit, SUSPENDED, PAUSED. Crash-loop detection by the §3.3 rule 3 definition (≥3 `RestartCount` increases, the first ≥ `CRASHLOOP_AFTER` ago, cleared after `RECOVERY_PERIOD` without one), independent of the inspect rate, with a test that varies the poll interval and `GRACE`. SUSPENDED clears as in §3.2.
 - SQLite store; control socket and CLI (pause/resume/unsuspend/status).
 - `State.Error` classification and the `heal-exited` modes; manual-stop markers.
+- Shutdown handling (§3.3, *Manual-stop markers*): quarantine on stream loss, persisted boot id, restore window, the sweep after every reconnect, "daemon not ready" for API errors during a restore. M1's tracker still reads a shutdown as manual stops (pinned in `rules_test.go`, `multiKeyEventVerdicts`); M2a changes that expectation on purpose.
+- **Done when:** the M2a integration tests in §6 pass, state survives a whalenurse restart, and an unhealthy container goes restart → "needs recreate (M2b)" → SUSPENDED.
+
+### M2b — Compose recreate, the drift guard and dependents
+
+- `internal/compose`: binary lookup (§3.4), command builder, the dry-run oracle with its `config --hash` fallback (§3.6).
 - Drift guard (§3.6), including the ref-holding skip.
-- Dependents (§3.5): discovery, ordering, staleness sweep, the remedy mapping (recreate via non-forced `up` when the parent ID is gone, API restart otherwise), and the "needs recreate (M2)" cases M1 only logs. A parent left down by policy leaves its dependents down (one notification).
-- Shutdown handling (§3.3, *Manual-stop markers*): quarantine on stream loss, persisted boot id, restore window, the sweep after every reconnect, "daemon not ready" for API errors during a restore. M1's tracker still reads a shutdown as manual stops (pinned in `rules_test.go`, `multiKeyEventVerdicts`); M2 changes that expectation on purpose.
+- Dependents (§3.5): discovery, ordering, staleness sweep, the remedy mapping (recreate via non-forced `up` when the parent ID is gone, API restart otherwise), and the "needs recreate (M2b)" cases M1 only logs. A parent left down by policy leaves its dependents down (one notification).
 - The startup version check and the per-rung minimums of §3.6 (one warning, rungs 2 and 3 disabled, ladder ends at notify + SUSPENDED after rung 1).
-- Rule 1's third shape and the address-independent port matcher (M1's matcher already ignores the address); the image-drift comparator of §3.6.
-- **Done when:** the M2 integration tests in §6 pass, and state survives a whalenurse restart.
+- Rule 1's third shape and the address-independent port matcher (M1's matcher already ignores the address); the image-drift comparator of §3.6. (The third shape is already pinned by the M0b fixtures and `rules_test.go`; this bullet stays whole because its second half is part of the drift guard.)
+- CI: the full compose matrix of §6 (v5.2.0, v5.6.0, latest) on both stores.
+- **Done when:** the M2b integration tests in §6 pass.
 
 ### M3 — Notifications
 - Vet the Shoutrrr fork at the source: latest release, maintenance, licence.
@@ -604,7 +627,7 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 4. ~~Should the dry-run plan replace the config-hash check?~~ **Answered:** it is the primary check for non-reference services and parents, with `config --hash` as the fallback (§3.6). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9) and [E5](m0-findings.md#e5---dry-run-as-the-recreate-oracle).
 5. ~~Does compose recreate dependents on a non-forced `up`?~~ **Answered:** yes after a parent recreate, no after a parent restart (E2). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9).
 6. Final defaults for grace, cooldown, crash-loop and rate limits (after M0).
-7. Confirm SQLite at the start of M2.
+7. Confirm SQLite at the start of M2a.
 8. ~~Image drift on Engines older than 28.1, and compose versions older than the matrix?~~ **Answered (17 Oct 2026):** rung 1 keeps Engine v25 as the minimum. Rungs 2 and 3 and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0. whalenurse checks both at startup; below that it logs one warning, disables rungs 2 and 3, and the ladder ends with notify + SUSPENDED after rung 1. No store-guessing fallback. See §3.6, *Minimum versions per rung*.
 
 ---

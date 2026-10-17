@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-The design lives in `docs/PLAN.md` (v3.3, which is v3.2 plus the approved M0b verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify), M1 (restart-only heal MVP) and M0b (the scenarios M0 could not run) are built; **M2 is next**, after the maintainer reviews M0b. The M0 results are in `docs/m0-findings.md`, the M0b results in `docs/m0b-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, and how to run the daemon in `docs/running.md`. The M0b verdicts are in the plan as v3.3 ("Changes in v3.3"); `docs/m0b-findings.md` has the evidence behind them.
+The design lives in `docs/PLAN.md` (v3.4, which is v3.3 plus the split of M2 into M2a and M2b; v3.3 holds the approved M0b verdicts; as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify), M1 (restart-only heal MVP) and M0b (the scenarios M0 could not run) are built. **M2 is split in two (plan §7): M2a** (CI on Docker 29, the SQLite store, the full ladder, the CLI, shutdown handling; no compose) **comes first, then M2b** (`internal/compose`, recreate, the drift guard with the version gate, dependents). Rung 2 does not exist until M2b: where the ladder would recreate it records "needs recreate (M2b)". The M0 results are in `docs/m0-findings.md`, the M0b results in `docs/m0b-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, and how to run the daemon in `docs/running.md`. The M0b verdicts are in the plan as v3.3 ("Changes in v3.3"); `docs/m0b-findings.md` has the evidence behind them.
 
 Layout:
 
@@ -29,7 +29,7 @@ whalenurse is a compose-aware self-healer for Docker hosts. For opted-in contain
 
 ## Working protocol (from the plan)
 
-- Work **one milestone at a time, in order: H, M0, M1, M0b, M2 … M6**. After each, stop and report what was built, what was verified and how, what is uncertain, and which **[maintainer]** items are open. Wait for review before starting the next.
+- Work **one milestone at a time, in order: H, M0, M1, M0b, M2a, M2b, M3 … M6**. After each, stop and report what was built, what was verified and how, what is uncertain, and which **[maintainer]** items are open. Wait for review before starting the next.
 - **[maintainer]** items (GitHub settings, anything on the real Docker host) are not yours to do. List them in the report.
 - **When you change `docs/PLAN.md`, update `CLAUDE.md` to match in the same PR.**
 - **Check upstream before relying on facts.** Verify Docker/Compose behavior and dependency versions against current source, docs or releases. Use the latest stable Go and the latest release of each dependency. Record differences from the plan.
@@ -97,7 +97,7 @@ Cross-cutting design points that span several packages:
 - **Dependents (`network_mode: container:<parent>` sidecars) break whenever the parent restarts or recreates.**
   - On a parent restart (same ID, parent started later), restart dependents via the API, one at a time.
   - On a parent recreate (parent ID gone), recreate the dependents with the non-forced `up -d --no-deps --pull never --no-build <dep>`. Use `--force-recreate` only if a post-check still finds a stale `NetworkMode` (M0 E1/E2).
-  - **Never API-restart a dependent whose parent ID is gone.** The restart fails and turns a running-but-disconnected dependent into an exited one. M1 logs it as "needs recreate (M2)".
+  - **Never API-restart a dependent whose parent ID is gone.** The restart fails and turns a running-but-disconnected dependent into an exited one. M1 logs it as "needs recreate (M2b)".
   - A stale dependent stays `running` with only a loopback interface, so only the staleness sweep (or the parent's `start`/`create` event) finds it. The sweep also covers the boot-time race. At boot Docker restores a dependent after its parent, also behind a slow parent start; a parent that is not restored takes its dependents down (M0b).
   - While a parent has an open incident or an in-flight action, suppress its dependents' ladders.
   - A dependent never triggers an action on its parent.

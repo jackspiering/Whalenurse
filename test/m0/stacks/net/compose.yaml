@@ -1,0 +1,12 @@
+# Parent with a network_mode: service: dependent (E1, E2).
+services:
+  parent:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+    healthcheck: {test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/"], interval: 2s, timeout: 2s, retries: 3}
+    stop_grace_period: 1s
+  dep:
+    image: whalenurse-m0/busybox:1
+    network_mode: service:parent
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    stop_grace_period: 1s

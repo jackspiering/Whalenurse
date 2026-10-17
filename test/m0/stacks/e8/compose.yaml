@@ -1,0 +1,18 @@
+# Hypothesis A: the restart policy restarts the process once, the start fails because the bind
+# source vanished, and Docker does not try again. `control` has no bind mount and shows the policy working.
+services:
+  stuck:
+    image: whalenurse-m0/busybox:1
+    restart: unless-stopped
+    command: ["sh", "-c", "sleep 4; exit 1"]
+    volumes:
+      - type: bind
+        source: ./src
+        target: /mnt/src
+        read_only: true
+        bind:
+          create_host_path: false
+  control:
+    image: whalenurse-m0/busybox:1
+    restart: unless-stopped
+    command: ["sh", "-c", "sleep 4; exit 1"]

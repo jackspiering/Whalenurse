@@ -1,0 +1,11 @@
+# Port already allocated: both services publish the same host port.
+services:
+  a:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+    ports: ["38080:8080"]
+  b:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+    ports: ["38080:8080"]
+    depends_on: [a]

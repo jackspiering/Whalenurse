@@ -1,0 +1,22 @@
+# depends_on restart: true, with a plain dependent and a network_mode dependent.
+services:
+  parent:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+    environment:
+      V: "${V:-1}"
+    healthcheck: {test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/"], interval: 2s, timeout: 2s, retries: 3}
+    stop_grace_period: 1s
+  plain:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    stop_grace_period: 1s
+    depends_on:
+      parent: {condition: service_healthy, restart: true}
+  netdep:
+    image: whalenurse-m0/busybox:1
+    network_mode: service:parent
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    stop_grace_period: 1s
+    depends_on:
+      parent: {condition: service_healthy, restart: true}

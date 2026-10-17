@@ -20,34 +20,34 @@ ro_docker() {
 }
 
 # journalctl needs privileges on most hosts. Try passwordless sudo, then plain
-# journalctl, then give up with a note (never prompt for a password).
-# $1: journalctl --since value (journalctl syntax, e.g. "-30m").
+# journalctl, then give up with a note that includes journalctl's own error (so a bad
+# --since is not mistaken for missing privileges). Never prompts for a password.
+# $1: journalctl --since value (see ro_since_journal).
 ro_journal() {
   local since="$1"
   local pat='failed to start container|restartmanger wait error|failed to restart container|failed to prepare mount points'
-  local out
-  if out=$(sudo -n journalctl -u docker --since "$since" --no-pager 2>/dev/null); then
+  local out err
+  err=$(mktemp)
+  if out=$(sudo -n journalctl -u docker --since "$since" --no-pager 2>"$err"); then
     :
-  elif out=$(journalctl -u docker --since "$since" --no-pager -q 2>/dev/null) && [[ -n "$out" ]]; then
+  elif out=$(journalctl -u docker --since "$since" --no-pager -q 2>>"$err") && [[ -n "$out" ]]; then
     :
   else
-    printf 'journal not readable: need passwordless sudo or membership in the adm/systemd-journal group\n'
+    printf 'journal not readable (need passwordless sudo or membership in the adm/systemd-journal group): %s\n' \
+      "$(tr '\n' ' ' <"$err" | head -c 300)"
+    rm -f "$err"
     return 0
   fi
+  rm -f "$err"
   grep -E "$pat" <<<"$out" || printf '(journal readable, no matching lines since %s)\n' "$since"
 }
 
-# Convert a Docker-style duration (30m, 2h, 90s, 1d) to journalctl's "-30m"
-# form. Anything else is passed through unchanged.
+# Convert a Docker-style duration (30m, 2h, 90s, 1d) to journalctl's relative form
+# ("-30m"). journalctl rejects "-30 min ago" (a leading "-" cannot be combined with "ago").
 ro_since_journal() {
   local s="$1"
   if [[ "$s" =~ ^[0-9]+[smhd]$ ]]; then
-    case "${s: -1}" in
-      s) printf -- '-%s sec ago' "${s%?}" ;;
-      m) printf -- '-%s min ago' "${s%?}" ;;
-      h) printf -- '-%s hour ago' "${s%?}" ;;
-      d) printf -- '-%s day ago' "${s%?}" ;;
-    esac
+    printf -- '-%s' "$s"
   else
     printf '%s' "$s"
   fi

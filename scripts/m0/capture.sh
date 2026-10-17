@@ -21,11 +21,13 @@ done
 [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || ro_die "bad container name: $name"
 [[ "$since" =~ ^[0-9]+[smhd]$ ]] || ro_die "--since must look like 30m, 2h, 90s or 1d"
 
-dest="$root/captures/$(date -u +%Y%m%dT%H%M%SZ)-$name"
 umask 077
+# Inspect first: an unknown container leaves no empty capture directory behind.
+inspect_json=$(ro_docker inspect "$name")
+dest="$root/captures/$(date -u +%Y%m%dT%H%M%SZ)-$name"
 mkdir -p "$dest"
 
-ro_docker inspect "$name" >"$dest/inspect.json"
+printf '%s\n' "$inspect_json" >"$dest/inspect.json"
 # --until makes `docker events` return instead of streaming forever.
 ro_docker events --since "$since" --until "$(date +%s)" \
   --filter "container=$name" --format '{{json .}}' >"$dest/events.ndjson"

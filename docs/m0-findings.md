@@ -109,7 +109,7 @@ piddep   f305178ca83e4c87 76f13dd867cfd6a3 MISMATCH    (pid: service:)
 vfdep    6604b84f6f896e71 7d531420e6936082 MISMATCH    (volumes_from)
 ```
 
-- The same table after the parent is recreated, and again after the dependents are recreated through compose (fresh labels), is unchanged for `parent`/`plain` (MATCH) and **still MISMATCH for all four reference holders**, so the skip rule is confirmed and covers `ipc`, `pid` and `volumes_from` too, not only `network_mode`.
+- The same table after the parent is recreated, and again after the dependents are recreated through compose (fresh labels), is unchanged for `parent`/`plain` (MATCH) and **still MISMATCH for all four reference holders**, so the skip rule in §3.6 is confirmed for all four reference types (`network_mode`, `ipc`, `pid`, `volumes_from`).
 - *Positive control:* editing `plain`'s environment changes its `--hash` (`0e21c523…` → `1e0c1bc5…`) while the label stays, so a real config drift is a mismatch.
 - Syntax: `--hash='*'` prints one `<service> <hash>` line per service, sorted by name; `--hash=parent,plain` prints two lines; `--hash='parent, plain'` fails with `no such service:  plain`, so spaces are not trimmed.
 
@@ -262,7 +262,7 @@ E1, E2 and E3 confirm every rule, with these clarifications to record (no design
 
 ### §3.6 Drift guard: **needs change**
 
-1. **Config check: confirmed**, with the skip rule extended to `ipc`, `pid` and `volumes_from` (E4: all four reference holders never match, even when freshly created). Syntax notes in E4 hold (sorted `<service> <hash>` lines, commas are not trimmed).
+1. **Config check: confirmed**, including the skip rule for all four reference types (E4: `network_mode`, `ipc`, `pid` and `volumes_from` holders never match, even when freshly created). Syntax notes in E4 hold (sorted `<service> <hash>` lines, commas are not trimmed).
 2. **Replace or supplement the check with the dry-run oracle (open question 4).** Proposal: for non-reference services and parents, run `<compose> --dry-run --progress json up -d --no-deps --pull never --no-build <svc>` and treat a `Recreate` text for the service's container as drift. It covers config and image drift together and is side-effect free (E5). Keep `config --hash` as the fallback when the output is not parseable, and for the reference holders keep the skip.
 3. **Image drift: the comparison as written is wrong on the containerd store.** The label `com.docker.compose.image` is the platform manifest digest, whereas `docker image inspect <ref>` `.Id` and the container's `.Image` are the index digest. A naive comparison reports drift for every container and would SUSPEND everything. On this store, compare the label with `docker image inspect --platform linux/<arch> <ref>` `.Descriptor.digest` (E5), or avoid the comparison by using the dry-run oracle. The classic store is untested (CI / maintainer item), so the integration test must run on both stores before the rule is final.
 4. **Compose version skew:** the `com.docker.compose.version` label is present (`5.6.0` in the fixtures). Skew behavior was not exercised: only one compose version is installed here, so the version matrix belongs in CI.
@@ -280,19 +280,19 @@ E1, E2 and E3 confirm every rule, with these clarifications to record (no design
 
 **[maintainer]**
 - **Daemon restart / host reboot** (E9's last scenario, boot-time restore, the shared 5s `container:` wait, shutdown `kill` events): not run by instruction. Only source-checked.
-- **Journal evidence for E8**: `journalctl -u docker` was not readable here (no passwordless sudo; the user is not in `adm`/`systemd-journal`); `capture.sh` writes a note instead. On the real host, run `scripts/m0/capture.sh <container>` with journal access to confirm `failed to start container`/`restartmanger wait error`.
+- **Journal evidence for E8**: `journalctl -u docker` was not readable here (no passwordless sudo; the user is not in `adm`/`systemd-journal`); `capture.sh` writes a note (including journalctl's own error) instead. The journal path was exercised only against a fake `journalctl`, plus a check that the `--since` values it generates (`-30m`, `-2h`, `-90s`, `-1d`) are accepted by the real `journalctl`; reading real daemon logs is unverified. On the real host, run `scripts/m0/capture.sh <container>` with journal access to confirm `failed to start container`/`restartmanger wait error`.
 - **Real host:** run `scripts/m0/scan.sh` and `capture.sh` when a stuck container appears (question 1); scrub with `scripts/scrub-fixture` before committing anything.
 - **Classic image store**: needs `daemon.json` and a daemon restart. Run E5's image-drift part (and ideally all of `run.sh`) there, or cover it in the CI matrix.
 - **Compose version matrix:** only v5.6.0 was available; choose the older version for the matrix (anything before the 29 Jun 2026 fix of #13878).
 - Engine 29.9.1 / containerd 2.4.2 upgrade on the VM, if the CI image should be tested against the exact latest.
-- Carried over from H: rename the repo to `whalenurse`, set the GitHub About text and topics.
+- From H: the rename, About text and topics are done (checked with `gh repo view`). Local clones, including this worktree, may still have `origin` on the old `…/Whalenurse` URL; GitHub redirects it, and `git remote set-url origin https://github.com/jackspiering/whalenurse.git` fixes it.
 
 ## 7. Fixtures
 
 Scrubbed with `scripts/scrub-fixture` and checked with `--check` (no `Config.Env`, hostnames, IPs, MACs, home or repository paths); no raw capture is committed.
 
 - `testdata/inspect/` (18): `e1-parent-after-recreate` + `e1-dep-stale-after-parent-recreate` (stale `NetworkMode`, `StartedAt` ordering), `e1-dep-stale-restart-failed`, `e8-stuck-failed-restart` (hypothesis A), `e8-control-restarting`, `e8c-nocmd/noexec/enotdir`, `e8d-port-allocated`, `e8e-dep-parent-stopped`, `e8e-dep-parent-removed`, `e9-crash-exited`, `e9-oom-killed`, `e9-sleeper-stopped`, `e9-sleeper-killed`, `e9-stubborn-stop-timeout`, `e9-loop-restarting`, `e9-hc-unhealthy`.
-- `testdata/events/` (10): `e9-stop`, `e9-kill`, `e9-restart`, `e9-recreate`, `e9-stop-timeout`, `e9-crash`, `e9-oom`, `e9-loop-restart-policy`, `e9-unhealthy`, `e1-recreate-parent`.
+- `testdata/events/` (11): `e8-stuck-failed-restart` (the failed restart: `create start die(1)` and nothing after), `e9-stop`, `e9-kill`, `e9-restart`, `e9-recreate`, `e9-stop-timeout`, `e9-crash`, `e9-oom`, `e9-loop-restart-policy`, `e9-unhealthy`, `e1-recreate-parent`.
 
 ## 8. Reproducing
 

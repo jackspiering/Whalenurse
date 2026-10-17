@@ -51,7 +51,8 @@ dc() {
   local a
   for a in "$@"; do
     case "$a" in
-      -p | -p=* | --project-name | --project-name=*) m0_die "dc: caller-supplied project name" ;;
+      # -p* also catches the attached form (-pother); --pull/--progress start with two dashes.
+      -p* | --project-name | --project-name=*) m0_die "dc: caller-supplied project name ($a)" ;;
       down | rm) m0_die "dc: '$a' is only allowed through m0_down" ;;
     esac
   done

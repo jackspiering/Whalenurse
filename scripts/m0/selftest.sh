@@ -7,6 +7,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
+real_journalctl=$(command -v journalctl || true)
 export FAKE_LOG="$tmp/calls.log"
 : >"$FAKE_LOG"
 
@@ -58,10 +59,20 @@ bad=$(grep -vE '^(ps|inspect|events|version|info|compose version|sudo|journalctl
 [[ -z "$bad" ]] || fail "non-allowlisted calls: $bad"
 calls=$(awk '{print $1}' "$FAKE_LOG" | sort -u | tr '\n' ' ')
 grep -q '^sudo -n ' "$FAKE_LOG" || fail "sudo must be called with -n (never prompt)"
+# journalctl gets a --since it can parse ("-30m"); "-30 min ago" is rejected by systemd.
+grep -q '^journalctl .*--since -30m ' "$FAKE_LOG" || fail "journalctl was not called with --since -30m: $(grep '^journalctl' "$FAKE_LOG")"
 
-# The wrapper itself must refuse mutating verbs.
+# The converted values must really parse with the host's journalctl (if there is one).
 # shellcheck source=lib-readonly.sh
 source "$here/lib-readonly.sh"
+if [[ -n "$real_journalctl" ]]; then
+  for d in 30m 2h 90s 1d; do
+    "$real_journalctl" --since "$(ro_since_journal "$d")" -n0 --no-pager -q >/dev/null 2>&1 \
+      || fail "journalctl cannot parse --since '$(ro_since_journal "$d")' (from $d)"
+  done
+fi
+
+# The wrapper itself must refuse mutating verbs.
 for v in "stop x" "restart x" "rm x" "kill x" "start x" "run alpine" "exec x ls" "compose up" "compose down" "pull alpine" "system prune" "network rm x"; do
   # shellcheck disable=SC2086
   if (ro_docker $v) 2>/dev/null; then fail "ro_docker allowed: $v"; fi

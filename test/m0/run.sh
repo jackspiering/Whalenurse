@@ -59,6 +59,10 @@ selftest() {
     expect_ok "project '$ok'" m0_require_project "$ok"
   done
   expect_refused "dc -p" dc whalenurse-m0-e1 -p other ps
+  expect_refused "dc -pother (attached)" dc whalenurse-m0-e1 -pother ps
+  expect_refused "dc -p=other" dc whalenurse-m0-e1 -p=other ps
+  expect_ok "dc --pull never is not a project flag" dc whalenurse-m0-e1 up --pull never
+  expect_ok "dc --progress json is not a project flag" dc whalenurse-m0-e1 --progress json ps
   expect_refused "dc --project-name" dc whalenurse-m0-e1 --project-name other ps
   expect_refused "dc --project-name=" dc whalenurse-m0-e1 --project-name=other ps
   expect_refused "dc down" dc whalenurse-m0-e1 down -v

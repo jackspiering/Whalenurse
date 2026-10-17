@@ -3,6 +3,7 @@
 # it is safe to commit under testdata/ (plan §3.3).
 #
 #   scrub-fixture [FILE]            scrub FILE (or stdin) to stdout; mode is auto-detected
+#   scrub-fixture --journal [FILE]  scrub journalctl text (hostname, home and repo paths, IPs, MACs); line by line
 #   scrub-fixture --check FILE      leak check: exit 1 if FILE still holds hostnames, IPs, MACs, Env or host paths
 #   scrub-fixture --self-test       run the built-in test on a synthetic sample
 #
@@ -113,6 +114,16 @@ scrub() {
   fi
 }
 
+# Journal text (M0b): one line in, one line out. Same placeholders as inspect mode. Container IDs
+# are kept. Lines are expected to be the few daemon messages that matter (see ro_journal), not a dump.
+scrub_journal() {
+  local args=()
+  mapfile -t args < <(env_args)
+  # Any other user's home directory too: journal lines carry paths the labels never did.
+  # shellcheck disable=SC2016  # a jq program
+  jq -R -r "${args[@]}" "${JQ_COMMON}"'scrub_str([]) | gsub("/(home|Users)/[^/\\s\"]+"; "/home/user")'
+}
+
 check() {
   local f="$1" bad=0 host home root
   [[ -r "$f" ]] || die "cannot read $f"
@@ -198,13 +209,32 @@ JSON
   done
   jq -e -s '.[0].timeNano == 0 and .[1].timeNano == 3000000000 and .[0].Actor.Attributes.exitCode == "1" and .[0].Actor.Attributes["com.docker.compose.service"] == "app"' "$out" >/dev/null || fail "events fields wrong"
   check "$out" || fail "check flags the scrubbed events output"
+
+  local self_host self_root
+  self_host=$(hostname)
+  self_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  cat >"$tmp/journal.txt" <<JOURNAL
+Oct 17 13:00:01 $self_host dockerd[847]: time="2026-10-17T13:00:01Z" level=error msg="failed to start container" container=0123456789abcdef error="failed to fulfil mount request: open /home/alice/stacks/web/src: no such file or directory (10.20.30.40, mac 02:42:ac:12:00:05, Bind for 0.0.0.0:80, 127.0.0.1)"
+Oct 17 13:00:02 $self_host dockerd[847]: msg="repo $self_root/x"
+JOURNAL
+  out="$tmp/journal.out"
+  scrub_journal <"$tmp/journal.txt" >"$out"
+  [[ $(wc -l <"$out") -eq 2 ]] || fail "journal mode must keep one line per line"
+  for secret in alice 10.20.30 02:42 "$(hostname)" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; do
+    ! grep -qF -- "$secret" "$out" || fail "journal output still contains '$secret'"
+  done
+  grep -qF 'failed to start container' "$out" || fail "journal message lost"
+  grep -qF 'container=0123456789abcdef' "$out" || fail "journal container id lost"
+  grep -qF 'Bind for 0.0.0.0:80, 127.0.0.1' "$out" || fail "journal: 0.0.0.0/127.0.0.1 were replaced"
+  check "$out" || fail "check flags the scrubbed journal output"
   echo "scrub-fixture self-test OK"
 }
 
 case "${1:-}" in
   --self-test) self_test ;;
+  --journal) if [[ $# -ge 2 ]]; then [[ -r "$2" ]] || die "cannot read $2"; scrub_journal <"$2"; else scrub_journal; fi ;;
   --check) [[ $# -eq 2 ]] || die "usage: scrub-fixture --check FILE"; check "$2" ;;
-  -h | --help) sed -n '2,24p' "$0" ;;
+  -h | --help) sed -n '2,25p' "$0" ;;
   "" | -) scrub ;;
   -*) die "unknown option: $1" ;;
   *) [[ -r "$1" ]] || die "cannot read $1"; scrub <"$1" ;;

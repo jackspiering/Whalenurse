@@ -1,0 +1,26 @@
+# CI jobs for M0b, NOT yet in .github/workflows/ci.yml: pushing workflow files needs the 'workflow' token scope.
+# [maintainer]: append the image-drift job below to the jobs: map of ci.yml, and add 'test/m0/m0b/selftest.sh' after 'test/m0/run.sh selftest' in the scripts job.
+  image-drift:
+    name: image-drift check (${{ matrix.store }} store)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [classic, containerd]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select the image store and restart Docker
+        run: |
+          if [ "${{ matrix.store }}" = containerd ]; then
+            echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json
+          else
+            echo '{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}' | sudo tee /etc/docker/daemon.json
+          fi
+          sudo systemctl restart docker
+          docker info --format 'storage driver: {{.Driver}} / {{json .DriverStatus}}'
+      - name: Image drift (M0b scenario 5; whalenurse-m0-b-imgdrift project only)
+        run: test/m0/m0b/image-drift.sh --out "$RUNNER_TEMP/imgdrift-${{ matrix.store }}"
+      - name: Summary
+        if: always()
+        run: cat "$RUNNER_TEMP/imgdrift-${{ matrix.store }}/summary.txt" || true

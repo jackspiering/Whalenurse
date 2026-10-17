@@ -1,0 +1,88 @@
+# M0b scenarios 2 and 3 (daemon restart, host reboot): one project, many boot-time situations.
+# Pairs are <letter>-parent / <letter>-dep, the dependent joining the parent's network namespace
+# (network_mode: service:), as the ScaleTail-style sidecars do.
+#
+#   a  ordinary pair, both unless-stopped. Control: the dependent must come up after the parent.
+#   s  slow APP: the parent listens and turns healthy only ~25s after it started. Does the boot
+#      order wait for readiness? (It should not: the daemon only waits for the parent's start.)
+#   p  slow START: the parent publishes ${P_PORTS} ports, so its container start takes ~7s (one
+#      docker-proxy per port), longer than the daemon's 5s wait for container: parents.
+#   f  the parent's bind source is deleted by prepare.sh, so its start fails at boot; the dependent
+#      then has a parent that is not running.
+#   g  the parent is fine; the dependent's own bind source is deleted, so the dependent's start fails.
+#   n  parent has restart: "no" (the daemon does not restore it); the dependent is unless-stopped.
+#   m  manual stops before the step: unless-stopped must stay stopped, always comes back.
+#   z  created, never started (restart policy is irrelevant; HasBeenStartedBefore is false).
+x-base: &base
+  image: whalenurse-m0/busybox:1
+  stop_grace_period: 2s
+x-loop: &loop
+  command: ["sh", "-c", "while true; do sleep 1; done"]
+services:
+  a-parent:
+    <<: *base
+    restart: unless-stopped
+    command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+    healthcheck: {test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/"], interval: 15s, timeout: 3s, retries: 3, start_period: 5s}
+  a-dep:
+    <<: [*base, *loop]
+    restart: unless-stopped
+    network_mode: service:a-parent
+
+  s-parent:
+    <<: *base
+    restart: unless-stopped
+    command: ["sh", "-c", "sleep 25; echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+    healthcheck: {test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/"], interval: 15s, timeout: 3s, retries: 3, start_period: 40s}
+  s-dep:
+    <<: [*base, *loop]
+    restart: unless-stopped
+    network_mode: service:s-parent
+
+  p-parent:
+    <<: [*base, *loop]
+    restart: unless-stopped
+    ports: ["127.0.0.1:${P_LO:-41000}-${P_HI:-41239}:${P_LO:-41000}-${P_HI:-41239}"]
+  p-dep:
+    <<: [*base, *loop]
+    restart: unless-stopped
+    network_mode: service:p-parent
+
+  f-parent:
+    <<: [*base, *loop]
+    restart: unless-stopped
+    volumes:
+      - {type: bind, source: ./f-src, target: /mnt/src, read_only: true, bind: {create_host_path: false}}
+  f-dep:
+    <<: [*base, *loop]
+    restart: unless-stopped
+    network_mode: service:f-parent
+
+  g-parent:
+    <<: [*base, *loop]
+    restart: unless-stopped
+  g-dep:
+    <<: [*base, *loop]
+    restart: unless-stopped
+    network_mode: service:g-parent
+    volumes:
+      - {type: bind, source: ./g-src, target: /mnt/src, read_only: true, bind: {create_host_path: false}}
+
+  n-parent:
+    <<: [*base, *loop]
+    restart: "no"
+  n-dep:
+    <<: [*base, *loop]
+    restart: unless-stopped
+    network_mode: service:n-parent
+
+  m-unless:
+    <<: [*base, *loop]
+    restart: unless-stopped
+  m-always:
+    <<: [*base, *loop]
+    restart: always
+
+  z-created:
+    <<: [*base, *loop]
+    restart: unless-stopped

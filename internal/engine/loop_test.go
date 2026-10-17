@@ -30,36 +30,45 @@ func TestCrashLoopNeedsThreeIncreasesAndCrashloopAfter(t *testing.T) {
 }
 
 func TestCrashLoopCountsDeltasBetweenInspects(t *testing.T) {
-	// One inspect that sees the count jump by 5 is 5 increases, not 1: two snapshots would say "changed once".
+	// An inspect that sees the count jump by 3 is 3 increases, not 1: two snapshots would say "changed once".
 	e, clk, _ := newEngine(t, 0)
 	e.Observe(tgt, Obs{})
 	clk.Advance(time.Minute)
+	e.Observe(tgt, Obs{RestartCount: 3})
+	clk.Advance(2 * time.Minute)
 	e.Observe(tgt, Obs{RestartCount: 5})
-	clk.Advance(5 * time.Minute)
+	clk.Advance(3 * time.Minute) // the first increase is 6 minutes old, the latest 3
 	if l := e.Observe(tgt, Obs{RestartCount: 5}); !l.Active || l.Increases != 5 {
 		t.Fatalf("%+v", l)
 	}
 }
 
-func TestCrashLoopClearsAfterRecoveryPeriodWithoutAnIncrease(t *testing.T) {
+func TestCrashLoopNeedsALatestIncreaseWithinCrashloopAfterAndClearsAfterRecoveryPeriod(t *testing.T) {
 	e, clk, _ := newEngine(t, 0)
 	e.Observe(tgt, Obs{})
 	for i := 1; i <= 4; i++ {
 		clk.Advance(2 * time.Minute)
 		e.Observe(tgt, Obs{RestartCount: i})
 	}
-	clk.Advance(5 * time.Minute)
+	clk.Advance(4 * time.Minute)
 	if l := e.Observe(tgt, Obs{RestartCount: 4}); !l.Active {
-		t.Fatalf("a loop still going 5 minutes after the last restart: %+v", l)
+		t.Fatalf("a loop that restarted 4 minutes ago is still a loop: %+v", l)
 	}
-	clk.Advance(5*time.Minute + time.Second) // RECOVERY_PERIOD (10m) since the last increase
+	clk.Advance(61 * time.Second) // 5m1s since the last restart: quiet for CRASHLOOP_AFTER, so not a loop any more
 	if l := e.Observe(tgt, Obs{RestartCount: 4}); l.Active {
-		t.Fatalf("not cleared after RECOVERY_PERIOD: %+v", l)
+		t.Fatalf("no restart for CRASHLOOP_AFTER, yet still a loop: %+v", l)
 	}
-	// And the count starts from zero again.
+	// ...but the count is kept until RECOVERY_PERIOD: one more restart 6 minutes after the last resumes the loop.
 	clk.Advance(time.Minute)
-	if l := e.Observe(tgt, Obs{RestartCount: 5}); l.Active {
+	if l := e.Observe(tgt, Obs{RestartCount: 5}); !l.Active || l.Increases != 5 {
 		t.Fatalf("%+v", l)
+	}
+	// After RECOVERY_PERIOD without an increase it starts from zero: one restart is not a loop.
+	clk.Advance(10*time.Minute + time.Second)
+	e.Observe(tgt, Obs{RestartCount: 5})
+	clk.Advance(time.Minute)
+	if l := e.Observe(tgt, Obs{RestartCount: 6}); l.Active {
+		t.Fatalf("not cleared after RECOVERY_PERIOD: %+v", l)
 	}
 }
 
@@ -76,21 +85,36 @@ func TestCrashLoopResetsWhenTheContainerIsRecreated(t *testing.T) {
 	}
 }
 
-// Pinned on purpose (an open question for the maintainer, see docs/m2a-notes.md): taken literally, rule 3 calls
-// three quick restarts followed by a long quiet a loop once CRASHLOOP_AFTER has passed since the first of them,
-// and keeps calling it one until RECOVERY_PERIOD has passed since the last.
-func TestCrashLoopLiteralEdgeThreeQuickRestartsThenQuiet(t *testing.T) {
+// Plan v3.5 refines rule 3: the latest increase must be within CRASHLOOP_AFTER too. Three quick restarts
+// followed by a long quiet were a loop for a while under the literal v3.4 text (and a stable container could
+// be restarted and SUSPENDED); now they never are. Restarts that continue to within CRASHLOOP_AFTER still are.
+func TestCrashLoopThreeQuickRestartsThenQuietIsNotALoop(t *testing.T) {
 	e, clk, _ := newEngine(t, 0)
 	e.Observe(tgt, Obs{})
 	clk.Advance(10 * time.Second)
-	e.Observe(tgt, Obs{RestartCount: 3}) // three restarts at once, then stable
-	clk.Advance(5*time.Minute + 10*time.Second)
-	if l := e.Observe(tgt, Obs{RestartCount: 3}); !l.Active {
-		t.Fatalf("the literal rule says loop: %+v", l)
+	e.Observe(tgt, Obs{RestartCount: 3}) // three restarts seen at once, then stable
+	start := clk.Now()
+	for _, wait := range []time.Duration{time.Minute, 4 * time.Minute, time.Minute, 2 * time.Minute} {
+		clk.Advance(wait)
+		if l := e.Observe(tgt, Obs{RestartCount: 3}); l.Active {
+			t.Fatalf("a quiet container was called a loop %s after its restarts: %+v", clk.Now().Sub(start), l)
+		}
 	}
-	clk.Advance(5 * time.Minute)
+
+	// Spread over four minutes, then quiet: a loop from the 5th minute until 5 minutes after the last restart.
+	e, clk, _ = newEngine(t, 0)
+	e.Observe(tgt, Obs{})
+	for i := 1; i <= 3; i++ {
+		e.Observe(tgt, Obs{RestartCount: i})
+		clk.Advance(2 * time.Minute)
+	}
+	// restarts at +0, +2m, +4m; now +6m
+	if l := e.Observe(tgt, Obs{RestartCount: 3}); !l.Active {
+		t.Fatalf("%+v", l)
+	}
+	clk.Advance(3*time.Minute + time.Second) // +9m1s: the last restart was 5m1s ago
 	if l := e.Observe(tgt, Obs{RestartCount: 3}); l.Active {
-		t.Fatalf("cleared 10 minutes after the last increase: %+v", l)
+		t.Fatalf("%+v", l)
 	}
 }
 

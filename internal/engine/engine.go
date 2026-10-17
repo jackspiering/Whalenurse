@@ -909,12 +909,12 @@ func (e *Engine) Status() Status {
 	now := e.clk.Now()
 	s := Status{RateLimit: e.p.RateLimit, Keys: []KeyStatus{}, Pauses: []Pause{}}
 	if now.Before(e.restoreUntil) {
-		s.RestoreUntil = e.restoreUntil
+		s.RestoreUntil = e.restoreUntil.UTC()
 	}
 	e.rateOK(now) // prunes e.spent
 	s.ActionsLastH = len(e.spent)
 	for _, p := range e.pauses {
-		s.Pauses = append(s.Pauses, Pause{Scope: p.scope, Until: p.until, Created: p.created})
+		s.Pauses = append(s.Pauses, Pause{Scope: p.scope, Until: p.until.UTC(), Created: p.created.UTC()})
 	}
 	sort.Slice(s.Pauses, func(i, j int) bool { return s.Pauses[i].Scope < s.Pauses[j].Scope })
 	cut := now.Add(-e.p.FlapWindow)
@@ -927,7 +927,7 @@ func (e *Engine) Status() Status {
 		}
 		ks := KeyStatus{Key: k, Name: st.name, State: "ok", Flaps: flaps, ManualStop: st.tracker.Evidence().ManualStop, LoopIncreases: st.loop.N}
 		if inc := st.incident; inc != nil {
-			ks.State, ks.Class, ks.Rung, ks.CooldownUntil = "incident", string(inc.class), inc.rung, inc.cooldownUntil
+			ks.State, ks.Class, ks.Rung, ks.CooldownUntil = "incident", string(inc.class), inc.rung, inc.cooldownUntil.UTC()
 			switch {
 			case inc.suspended:
 				ks.State, ks.SuspendReason = "SUSPENDED", inc.spentReason
@@ -936,7 +936,7 @@ func (e *Engine) Status() Status {
 			}
 		}
 		if p := e.pausedLocked(k, now); p != nil {
-			ks.PausedUntil = p.until
+			ks.PausedUntil = p.until.UTC()
 			if ks.State == "ok" || ks.State == "incident" {
 				ks.State = "PAUSED"
 			}

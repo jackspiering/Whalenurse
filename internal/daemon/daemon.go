@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,13 @@ const actionTimeout = 2 * time.Minute
 
 // MetaBootID is the store key the kernel boot id is kept under.
 const MetaBootID = "boot_id"
+
+// MetaLastSeen is the store key of the heartbeat: unix nanoseconds of the previous run's last activity.
+const MetaLastSeen = "last_seen"
+
+// heartbeatEvery is how often last_seen is written. A marker set after the last heartbeat is newer than
+// it, so it is inside the quarantine window all the same.
+const heartbeatEvery = 5 * time.Second
 
 // BootIDPath is where Linux publishes the boot id (the same value on the host and in a container).
 const BootIDPath = "/proc/sys/kernel/random/boot_id"
@@ -74,6 +82,7 @@ type Daemon struct {
 	log *slog.Logger
 
 	started     time.Time
+	lastBeat    time.Time // when last_seen was last written
 	settled     bool
 	settledFlag atomic.Bool // settled, readable from the control socket
 	nextPoll    time.Time
@@ -114,34 +123,65 @@ func New(o Options) *Daemon {
 	d.started = o.Clock.Now()
 	d.eventsDown.Store(d.started.UnixNano())
 	d.lastTick.Store(d.started.UnixNano())
-	d.checkBoot()
+	d.checkStartup()
 	return d
 }
 
-// checkBoot compares the kernel's boot id with the one stored with the markers
-// (plan §3.3, mechanism b). A reboot stops whalenurse in the same second as the
-// containers, so a marker can exist with no matching event in this run: if the
-// boot id changed, every marker is dropped and the first STARTUP_SETTLE is a
-// restore window.
-func (d *Daemon) checkBoot() {
+// checkStartup applies what the previous run left behind (plan §3.3, *Manual-stop markers*):
+//
+//   - mechanism b: the kernel's boot id is kept with the markers. A reboot stops whalenurse in the same second as
+//     the containers, so a marker can exist with no matching event in this run: if the boot id changed, every
+//     marker is dropped and the first STARTUP_SETTLE is a restore window.
+//   - mechanism d, the heartbeat: whalenurse is itself one of the containers a daemon shutdown kills, so its
+//     events stream ends by its own SIGTERM and mechanism a never sees a loss. The previous run's end is treated
+//     as a stream loss instead: markers set in the 30 s before its last_seen are discarded, and when the gap since
+//     then exceeds the poll interval the daemon may be restoring containers, so a restore window opens.
+func (d *Daemon) checkStartup() {
 	if d.o.Meta == nil {
 		return
 	}
+	now := d.clk.Now()
 	read := d.o.BootID
 	if read == nil {
 		read = readBootID
 	}
-	id := strings.TrimSpace(read())
-	if id == "" {
+	if id := strings.TrimSpace(read()); id != "" {
+		prev, had := d.o.Meta.Meta(MetaBootID)
+		d.o.Meta.SetMeta(MetaBootID, id)
+		if had && prev != id {
+			d.log.Info("new boot id: dropping manual-stop markers", "previous", prev, "current", id)
+			d.eng.DropAllMarkers("boot id changed: the host rebooted")
+			d.eng.OpenRestoreWindow(d.cfg.StartupSettle, "new boot id")
+		}
+	}
+	if v, ok := d.o.Meta.Meta(MetaLastSeen); ok {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			seen := time.Unix(0, n)
+			gap := now.Sub(seen)
+			if cleared := d.eng.QuarantineMarkers(seen); len(cleared) > 0 {
+				d.log.Info("the previous run ended: manual-stop markers set in the 30s before it are discarded (it may have been the daemon's shutdown)",
+					"last_seen", seen.UTC().Format(time.RFC3339), "count", len(cleared))
+			}
+			if gap > d.cfg.PollInterval {
+				d.log.Info("whalenurse was not running for a while: the daemon may be restoring containers", "gap", gap.Round(time.Second).String())
+				d.eng.OpenRestoreWindow(d.cfg.StartupSettle, "whalenurse was down for "+gap.Round(time.Second).String())
+			}
+		}
+	}
+	d.heartbeat(true)
+}
+
+// heartbeat records that the daemon is alive (last_seen). Cheap: at most one write every few seconds.
+func (d *Daemon) heartbeat(force bool) {
+	if d.o.Meta == nil {
 		return
 	}
-	prev, had := d.o.Meta.Meta(MetaBootID)
-	d.o.Meta.SetMeta(MetaBootID, id)
-	if had && prev != id {
-		d.log.Info("new boot id: dropping manual-stop markers", "previous", prev, "current", id)
-		d.eng.DropAllMarkers("boot id changed: the host rebooted")
-		d.eng.OpenRestoreWindow(d.cfg.StartupSettle, "new boot id")
+	now := d.clk.Now()
+	if !force && now.Sub(d.lastBeat) < heartbeatEvery {
+		return
 	}
+	d.lastBeat = now
+	d.o.Meta.SetMeta(MetaLastSeen, strconv.FormatInt(now.UnixNano(), 10))
 }
 
 func readBootID() string {
@@ -192,6 +232,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			d.heartbeat(true) // the clean end: the next run quarantines markers from just before it
 			return ctx.Err()
 		case ev := <-evCh:
 			d.HandleEvent(ctx, ev)
@@ -362,6 +403,7 @@ func (d *Daemon) StreamConnected() {
 func (d *Daemon) Tick(ctx context.Context) {
 	now := d.clk.Now()
 	d.lastTick.Store(now.UnixNano())
+	d.heartbeat(false)
 
 	if !d.settled {
 		if now.Sub(d.started) < d.cfg.StartupSettle {

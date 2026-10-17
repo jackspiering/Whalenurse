@@ -18,7 +18,8 @@ type Obs struct {
 
 // Observe feeds one inspect into the crash-loop tracker of the key and returns
 // the verdict for rule 3: at least 3 RestartCount increases, the first at least
-// CRASHLOOP_AFTER ago, cleared once RECOVERY_PERIOD has passed without a new one.
+// CRASHLOOP_AFTER ago and the latest less than CRASHLOOP_AFTER ago; the count is
+// cleared once RECOVERY_PERIOD has passed without a new increase.
 //
 // The rule counts increases between inspects (the sum of the deltas), so the
 // poll interval and GRACE decide only how late it notices, not whether. An
@@ -60,7 +61,9 @@ func (e *Engine) Observe(t Target, o Obs) rules.Loop {
 	}
 	e.flush(t.Key, st)
 
-	if l.N >= crashLoopIncreases && now.Sub(l.First) >= e.p.CrashloopAfter {
+	// At least 3 increases, the first at least CRASHLOOP_AFTER ago, and the latest within CRASHLOOP_AFTER: a few
+	// quick restarts followed by a long quiet are not a loop (plan §3.3 rule 3, v3.5).
+	if l.N >= crashLoopIncreases && now.Sub(l.First) >= e.p.CrashloopAfter && now.Sub(l.Last) < e.p.CrashloopAfter {
 		return rules.Loop{Active: true, Since: l.First, Increases: l.N}
 	}
 	return rules.Loop{}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -252,10 +253,11 @@ func TestANewBootIdDropsMarkersAndOpensARestoreWindow(t *testing.T) {
 	if !h.d.Engine().Evidence("h/p/web/1").ManualStop {
 		t.Fatal("setup")
 	}
+	h.advance(time.Minute) // a real manual stop, a minute before whalenurse is restarted
 
-	h.start(h.withStore(st, "boot-A")) // whalenurse restarted, same boot: the marker is still good
+	h.start(h.withStore(st, "boot-A")) // whalenurse restarted, same boot: a marker from before its last 30s is still good
 	if !h.d.Engine().Evidence("h/p/web/1").ManualStop {
-		t.Fatal("a restart within the same boot must keep the markers")
+		t.Fatal("a restart within the same boot must keep the markers older than the quarantine window")
 	}
 	if !h.d.Engine().RestoreWindowUntil().Before(h.clk.Now()) {
 		t.Fatal("no restore window without a reboot")
@@ -348,34 +350,110 @@ func TestStartsInsideTheRestoreWindowDoNotClearSuspended(t *testing.T) {
 	}
 }
 
-// KNOWN GAP, pinned on purpose (open question 1 in docs/m2a-notes.md). In container mode a daemon restart kills
-// whalenurse too. Its stream ends because of its own SIGTERM, which mechanism a excludes by name, and the boot id
-// is unchanged, so mechanism b does not fire. The shutdown-kill markers were persisted; after the restart the
-// restore's `start` follows a marker and clears SUSPENDED, which plan v3.3 forbids. When this is fixed, flip the
-// expectation.
-func TestKnownGapWhalenurseKilledByTheDaemonShutdownItself(t *testing.T) {
+// In container mode a daemon restart kills whalenurse too. Its stream ends by its own SIGTERM, so no stream loss is
+// ever seen, and the boot id is unchanged. The shutdown-kill markers it saw before dying were persisted. The
+// heartbeat (plan §3.3 mechanism d, v3.5) treats the previous run's end as a stream loss: the markers set in the
+// 30 s before last_seen are discarded, so the restore's `start` follows no marker and SUSPENDED survives.
+// (This was the "known gap" of M2a, pinned by a test that asserted the opposite.)
+func TestWhalenurseKilledByTheDaemonShutdownItselfStaysSuspended(t *testing.T) {
+	for _, tc := range []struct{ shutdown, boot string }{
+		{"m0b-daemon-restart-shutdown", "m0b-daemon-restart-boot"},
+		{"m0b-reboot-shutdown", "m0b-reboot-boot"},
+	} {
+		t.Run(tc.shutdown, func(t *testing.T) {
+			st := openStore(t)
+			h := newHarnessOpts(t, func(c *config.Global) { modeAll(c) }, nil, nil)
+			h.start(h.withStore(st, "boot-A"))
+			evs := loadEvents(t, tc.shutdown)
+			ctrs := h.containersFrom(evs)
+			key := "h/whalenurse-m0-b-boot/a-parent/1"
+			h.set(ctrs[key].ID, func(c *docker.Container) { c.Health = "unhealthy" })
+			h.advance(7 * time.Minute)
+			if !h.d.Engine().Suspended(key) {
+				t.Fatalf("setup: %v", h.rec.Types())
+			}
+			h.feed(evs) // the shutdown kills reach whalenurse before it is killed itself; markers are persisted
+			if h.markers(ctrs) == 0 {
+				t.Fatal("setup: the kills should have set markers")
+			}
+			// whalenurse exits (SIGTERM from the daemon): the context just ends, no StreamLost. A clean stop writes last_seen.
+			h.d.heartbeat(true)
+			h.stopAll(ctrs, 137)
+			h.clk.Advance(30 * time.Second) // the daemon restarts; the new daemon restores whalenurse among the others
+
+			h.start(h.withStore(st, "boot-A")) // same boot id
+			if got := h.markers(ctrs); got != 0 {
+				t.Fatalf("%d shutdown-kill markers survived the restart of whalenurse", got)
+			}
+			h.startAll(ctrs)
+			h.set(ctrs[key].ID, func(c *docker.Container) { c.Health = "unhealthy" })
+			h.feed(loadEvents(t, tc.boot))
+			if !h.d.Engine().Suspended(key) {
+				t.Fatalf("the restore unsuspended it: %v", h.rec.Types())
+			}
+			if h.count(engine.Unsuspended) != 0 {
+				t.Fatalf("%v", h.rec.Types())
+			}
+		})
+	}
+}
+
+func TestALongGapSinceLastSeenOpensARestoreWindow(t *testing.T) {
 	st := openStore(t)
-	h := newHarnessOpts(t, func(c *config.Global) { modeAll(c) }, nil, nil)
+	set := func(c *config.Global) { settled(c); c.PollInterval = time.Minute }
+	h := newHarnessOpts(t, set, nil, nil)
 	h.start(h.withStore(st, "boot-A"))
-	evs := loadEvents(t, "m0b-daemon-restart-shutdown")
-	ctrs := h.containersFrom(evs)
-	key := "h/whalenurse-m0-b-boot/a-parent/1"
-	h.set(ctrs[key].ID, func(c *docker.Container) { c.Health = "unhealthy" })
-	h.advance(7 * time.Minute)
-	if !h.d.Engine().Suspended(key) {
-		t.Fatalf("setup: %v", h.rec.Types())
+	a := h.running(hexID("a1"), "p", "web")
+	h.advance(2*time.Minute + time.Second)
+	h.d.heartbeat(true)
+
+	h.clk.Advance(50 * time.Second) // under the poll interval: not a window
+	h.start(h.withStore(st, "boot-A"))
+	if !h.d.Engine().RestoreWindowUntil().Before(h.clk.Now()) {
+		t.Fatal("a short gap opened a restore window")
 	}
-	h.feed(evs) // the shutdown kills reach whalenurse before it is killed itself; markers are persisted
-	// whalenurse exits (SIGTERM from the daemon): no StreamLost, the context just ends.
-	h.stopAll(ctrs, 137)
-	h.start(h.withStore(st, "boot-A")) // restarted by the new daemon's restore, same boot id
-	h.startAll(ctrs)
-	h.set(ctrs[key].ID, func(c *docker.Container) { c.Health = "unhealthy" })
-	h.feed(loadEvents(t, "m0b-daemon-restart-boot"))
-	if h.d.Engine().Suspended(key) {
-		t.Fatalf("the gap is closed (SUSPENDED survived the restore): flip this test to expect that, and update open question 1 in docs/m2a-notes.md")
+
+	h.d.heartbeat(true)
+	h.clk.Advance(5 * time.Minute) // whalenurse was down for a while; the daemon may have been restoring
+	h.start(h.withStore(st, "boot-A"))
+	if want := h.clk.Now().Add(2 * time.Minute); !h.d.Engine().RestoreWindowUntil().Equal(want) {
+		t.Fatalf("restore window until %v, want %v", h.d.Engine().RestoreWindowUntil(), want)
 	}
-	t.Log("gap confirmed: the restore's start cleared SUSPENDED because the shutdown kill left a persisted marker")
+	h.event(a, "kill", "") // inside it, a kill sets no marker
+	if h.d.Engine().Evidence("h/p/web/1").ManualStop {
+		t.Fatal("a kill inside the restore window set a marker")
+	}
+}
+
+func TestHeartbeatIsWrittenEveryFewSecondsAndAtTheEnd(t *testing.T) {
+	st := openStore(t)
+	h := newHarnessOpts(t, nil, nil, nil)
+	h.start(h.withStore(st, "boot-A"))
+	last := func() int64 {
+		v, _ := st.Meta(MetaLastSeen)
+		n, _ := strconv.ParseInt(v, 10, 64)
+		return n
+	}
+	first := last()
+	if first == 0 {
+		t.Fatal("no last_seen written at start")
+	}
+	h.advance(3 * time.Second)
+	if last() != first {
+		t.Fatal("written more often than every few seconds")
+	}
+	h.advance(3 * time.Second)
+	if last() == first {
+		t.Fatal("not refreshed after the heartbeat interval")
+	}
+	h.clk.Advance(time.Second)
+	h.d.heartbeat(true)
+	if want := h.clk.Now().UnixNano(); last() != want {
+		t.Fatalf("the final heartbeat should be 'now': %d vs %d", last(), want)
+	}
+	// A dry run has no store, hence no heartbeat and no startup bookkeeping.
+	h2 := newHarness(t, nil, nil)
+	h2.advance(time.Minute)
 }
 
 // ---- the sweep after a reconnect ----------------------------------------------------------------

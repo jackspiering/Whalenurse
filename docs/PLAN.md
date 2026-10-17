@@ -495,7 +495,7 @@ internal/config/     env + label parsing
 
 ### M0b — Scenarios M0 could not run (no app code; after M1, must finish before M2)
 
-M0 ran on a VM where the daemon could not be restarted and the journal was not readable (findings §6). M0b closes those gaps. It extends `test/m0` and `scripts/m0`; the safety rules of §0 apply unchanged, and it needs the maintainer's confirmation of the host.
+M0 ran on a VM where the daemon could not be restarted and the journal was not readable (findings §6). M0b closes those gaps; its results and the proposed §3 changes are in [m0b-findings.md](m0b-findings.md). The scripts are in `test/m0/m0b/` (prepare, maintainer step, collect). It extends `test/m0` and `scripts/m0`; the safety rules of §0 apply unchanged, and it needs the maintainer's confirmation of the host.
 
 - **[maintainer]** Daemon restart and host reboot (E9's last scenario) on the throwaway VM. Record:
   - the shutdown `kill` events and how the manual-stop markers (§3.3) clear on Docker's boot restart;
@@ -504,7 +504,7 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 - **[maintainer]** Journal evidence: run `scripts/m0/capture.sh` on a host where `journalctl -u docker` is readable, and confirm `failed to start container` and `restartmanger wait error` appear for E8 and for boot-time restore.
 - **Classic image store:** switch the VM's `daemon.json` to the classic store (**[maintainer]**: needs a daemon restart), and run E5's image-drift part, ideally all of `run.sh`. Confirm what `com.docker.compose.image` holds there (§3.6). CI covers this too, so write the check so that CI can run it.
 - **Engine 29.9.1** (containerd 2.4.2): upgrade the VM (**[maintainer]**: restarts the daemon) and re-run the suite. Findings §1 found no change in 29.9.1 that touches any experiment, so expect no differences.
-- **Done when:** each item has an answer with scrubbed evidence in `docs/m0-findings.md` (a new section) and fixtures in `testdata/`, and §3.3, §3.5 and §3.6 are each marked "confirmed" or "needs change" for what M0b tested. Report anything that contradicts a plan rule before M2 starts.
+- **Done when:** each item has an answer with scrubbed evidence in [m0b-findings.md](m0b-findings.md) (a separate file, not a section of `m0-findings.md`) and fixtures in `testdata/`, and §3.3, §3.5 and §3.6 are each marked "confirmed" or "needs change" for what M0b tested. Report anything that contradicts a plan rule before M2 starts.
 
 ### M2 — Compose recreate, escalation and persistence
 - `internal/compose`: binary lookup (§3.4), command builder, the dry-run oracle with its `config --hash` fallback (§3.6).

@@ -29,8 +29,13 @@ cfg='{
   "features": { "containerd-snapshotter": false },
   "storage-driver": "overlay2"
 }'
-m0b_write_script switch-back "SWITCH BACK to the containerd image store (run only after collect.sh and any run.sh all; there was no daemon.json before)" \
-  'sudo rm /etc/docker/daemon.json' \
+# Removing daemon.json is NOT enough: once the data root holds an overlay2 store the daemon keeps it ("graphdriver-prior").
+m0b_write_script switch-back "SWITCH BACK to the containerd image store, explicitly (run only after collect.sh and any run.sh all; there was no daemon.json before)" \
+  "sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'
+{
+  \"features\": { \"containerd-snapshotter\": true }
+}
+JSON" \
   'sudo systemctl restart docker' \
   "docker info --format '{{.Driver}} {{json .DriverStatus}}'  # expect: overlayfs [[driver-type io.containerd.snapshotter.v1]]" \
   'docker images  # the M0 images reappear'

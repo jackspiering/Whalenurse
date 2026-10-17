@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-The design lives in `docs/PLAN.md` (v3.2, which is v3.1 plus the approved M1 verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify) and M1 (restart-only heal MVP) are built; **M0b is next** (after the maintainer reviews M1), then M2. The M0 results are in `docs/m0-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, and how to run the daemon in `docs/running.md`.
+The design lives in `docs/PLAN.md` (v3.2, which is v3.1 plus the approved M1 verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify), M1 (restart-only heal MVP) and M0b (the scenarios M0 could not run) are built; **M2 is next**, after the maintainer reviews M0b. The M0 results are in `docs/m0-findings.md`, the M0b results in `docs/m0b-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, and how to run the daemon in `docs/running.md`. `docs/m0b-findings.md` holds proposed §3 changes that are not yet in the plan (shutdown kills must not set manual-stop markers or clear SUSPENDED; the image-drift comparator is `docker image inspect --platform linux/<arch> --format '{{.Id}}'`, never `.Descriptor.digest`; a third failed-start shape); read it before M2.
 
 Layout:
 
 - Go module `github.com/jackspiering/whalenurse` (Go 1.27.2). `cmd/whalenurse` has `run [--dry-run]`, `healthcheck` and `version`. `internal/` has `docker` (moby client behind interfaces, plus a `Fake`), `rules`, `engine`, `daemon` (wires events, poll, sweep, the pre-action guard and the actor), `config`, `clock`, `api` (`/healthz`) and `control` (unix socket). The planned packages `compose`, `store`, `notify` and `web` do not exist yet.
 - `test/integration/`: tests against a real Docker daemon (build tag `integration`), with the fail-closed guard in `guard.go`.
-- `scripts/m0/`, `scripts/scrub-fixture`, `test/m0/`, `testdata/inspect/`, `testdata/events/`: the M0 tooling and scrubbed fixtures.
+- `scripts/m0/`, `scripts/scrub-fixture` (inspect, events and `--journal` modes), `test/m0/`, `testdata/inspect/`, `testdata/events/`, `testdata/journal/`: the M0 tooling and scrubbed fixtures.
+- `test/m0/m0b/`: the M0b scenarios, each `prepare.sh` → maintainer step (`step.sh`) → `collect.sh`, plus `image-drift.sh` (store-aware, for CI), `teardown.sh` and `selftest.sh`. State goes to `captures/m0b/` (gitignored). The CI job for `image-drift.sh` is in `ci-image-drift.job.yml` until the maintainer adds it to `ci.yml`.
 - `Dockerfile` (distroless/static:nonroot), `.github/workflows/ci.yml`, `examples/compose.yaml`.
 
 Commands:
@@ -19,10 +20,10 @@ Commands:
 go vet ./... && go test -race ./...                      # unit tests; touch no Docker
 CGO_ENABLED=0 go build -trimpath -o whalenurse ./cmd/whalenurse
 shellcheck -x $(grep -rIl --exclude-dir=testdata -E '^#!.*(ba)?sh' scripts test; find scripts test -name '*.sh')
-scripts/m0/selftest.sh && scripts/scrub-fixture --self-test && test/m0/run.sh selftest   # M0 self-tests: no Docker needed
+scripts/m0/selftest.sh && scripts/scrub-fixture --self-test && test/m0/run.sh selftest && test/m0/m0b/selftest.sh   # self-tests: no Docker needed
 ```
 
-The integration tests (`WHALENURSE_INTEGRATION=1 go test -tags integration ./test/integration/`) and `test/m0/run.sh all` act on a real Docker daemon. The integration tests run in CI on GitHub-hosted runners; do not run them locally unless the maintainer has confirmed the host (see Docker host safety below).
+The integration tests (`WHALENURSE_INTEGRATION=1 go test -tags integration ./test/integration/`), `test/m0/run.sh all` and the `test/m0/m0b/` scenarios act on a real Docker daemon; the M0b steps restart the daemon, reboot or switch the image store, so only the maintainer runs them. Never run a probe outside the agreed scenarios, or anything that can exhaust CPU, memory, disk or ports, without asking (M0b's 4000-port probe nearly exhausted the VM). The integration tests run in CI on GitHub-hosted runners; do not run them locally unless the maintainer has confirmed the host (see Docker host safety below).
 
 whalenurse is a compose-aware self-healer for Docker hosts. For opted-in containers that go unhealthy or stop unexpectedly, it restarts them, then recreates them from the stack's own compose files, then optionally pulls and recreates. It notifies on giving up. It is a single static Go binary that runs as a container (socket mounted) or under systemd.
 
@@ -90,7 +91,7 @@ Cross-cutting design points that span several packages:
   - The drift guard (config drift, image drift, compose version skew) runs before recreate. Any failure skips the recreate, notifies, and sets SUSPENDED.
   - Config drift: the primary check is the dry-run oracle, `--dry-run --progress json up -d --no-deps --pull never --no-build <svc>`, where a `Recreate` text for the container means drift. `config --hash` is the fallback when that output can't be parsed.
   - Both are skipped for services that reference another service or container (`network_mode`/`ipc`/`pid`/`volumes_from`), because compose hashes those after resolving them.
-  - Image drift on the containerd store: compare the `com.docker.compose.image` label with `docker image inspect --platform linux/<arch>` `.Descriptor.digest`. Never use `.Id` or the container's `.Image`: they are index digests, so every container would look drifted. The classic store is still to be verified (M0b, CI).
+  - Image drift on the containerd store: compare the `com.docker.compose.image` label with `docker image inspect --platform linux/<arch>` `.Descriptor.digest`. Never use `.Id` or the container's `.Image`: they are index digests, so every container would look drifted. M0b found that on the classic store `.Descriptor.digest` is empty, so this comparison would flag every container there; `docs/m0b-findings.md` proposes `docker image inspect --platform linux/<arch> --format '{{.Id}}'`, which works on both stores (not yet in the plan).
 - **Dependents (`network_mode: container:<parent>` sidecars) break whenever the parent restarts or recreates.**
   - On a parent restart (same ID, parent started later), restart dependents via the API, one at a time.
   - On a parent recreate (parent ID gone), recreate the dependents with the non-forced `up -d --no-deps --pull never --no-build <dep>`. Use `--force-recreate` only if a post-check still finds a stale `NetworkMode` (M0 E1/E2).

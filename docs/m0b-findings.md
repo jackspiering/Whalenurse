@@ -2,6 +2,8 @@
 
 Milestone M0b of [PLAN.md](PLAN.md) §7: the scenarios M0 could not run ([m0-findings.md](m0-findings.md) §6). No app code. Run on 17 Oct 2026 on the same throwaway Debian VM as M0 (Debian 13, kernel 6.12, cgroup v2), with the maintainer running every root or disruptive step. Raw output lives in `captures/` (gitignored); only scrubbed excerpts and fixtures are committed. This file is separate from `m0-findings.md`; plan §7 says "a new section" there, and §7 now points here instead.
 
+**Approved 17 Oct 2026 and applied as PLAN v3.3** ("Changes in v3.3"), with these decisions on the proposals below: the shutdown-kill mechanisms 1 (quarantine on stream loss), 3 (persist the boot id) and 4 (restore window) are adopted; **mechanism 2 (the kill burst) is rejected**, because `docker compose stop` and `down` send the same burst and deliberate stops would be healed; a `restart: "no"` parent stopped by a shutdown respects its policy (it and its dependents stay down, one notification; only `heal-exited=always` starts them); the CI job and the self-test are in `ci.yml`. The text below is the evidence and the original proposals; where it says "proposed", the plan is authoritative.
+
 **Summary.** The design holds. §3.5 is confirmed. §3.3 and §3.6 each need corrections, listed in [Verdicts](#4-verdicts). Nothing is dropped, but three items change what M2 must implement:
 
 1. **Kills during a daemon shutdown or a reboot must not set manual-stop markers or clear SUSPENDED.** Every running container gets `kill` at shutdown, an observer is cut off before it sees `die`, and the restore afterwards emits `start` for the containers that come back. Taken literally, §3.3 and §3.2 together would mark everything as manually stopped and then unsuspend everything ([Standalone M2 item](#standalone-m2-item-shutdown-kills)).
@@ -155,7 +157,7 @@ Evidence:
 What M2 should implement (proposed; this does not change §3 until approved):
 
 1. **Quarantine on stream loss.** When the events stream ends (EOF or error) for a reason other than whalenurse shutting down, discard every manual-stop marker created in the 30s before the loss (the daemon's own shutdown limit is 15s, plus the kill timeouts). This is the reliable signal for a daemon restart.
-2. **Recognise the burst.** `kill` with signal 15 for two or more containers within one second, outside any in-flight window, is a shutdown, not a person. Tag those markers `shutdown`. A `shutdown` marker never counts as "someone stopped it", and a `start` that follows one never clears SUSPENDED.
+2. ~~**Recognise the burst.**~~ **Rejected by the maintainer.** `docker compose stop` and `down` (and stopping several containers by hand) send the same burst of `kill[15]`, so a burst rule would treat deliberate stops as shutdowns and heal them. Only the stream loss (1) and the boot id (3) are reliable signals; the plan says not to add a burst heuristic.
 3. **Persist the boot id.** Store `/proc/sys/kernel/random/boot_id` with the markers. On startup, if it differs from the stored one, drop all markers older than the boot and treat the first `STARTUP_SETTLE` as a restore window in which `start` events do not clear SUSPENDED.
 4. **A restore window after reconnecting** to a daemon that was down (the API answers only after `Loading containers: done`): `start` events in it are restores, not manual starts.
 5. **Test it:** extend the §6 unit test "daemon-shutdown kill markers are cleared on start" with the two fixtures above, and a SUSPENDED container that is killed by a shutdown and restored must stay SUSPENDED.
@@ -180,7 +182,7 @@ The unit test in §6 names only half of the problem ("markers are cleared on sta
    ```
    where `<arch>` is the server's (`docker version --format '{{.Server.Arch}}'`). It equals the label before a re-tag and differs after on both stores (the platform manifest digest on containerd, the image ID on classic). Never compare the label with plain `<ref>` `.Id`, with `.RepoDigests` or with the container's `.Image`: on containerd they are index digests and never match; on classic plain `.Id` happens to work, which is the trap. If the inspect fails (the ref is no longer present locally, or has no such platform), that is itself drift or a failure: skip the recreate and say why.
    The dry-run oracle already covers image drift for the services it checks; this explicit comparison is for the services the oracle skips and for the hash fallback, as the plan says.
-3. **Test it on both stores.** `test/m0/m0b/image-drift.sh` is standalone, prints every comparator, and exits 0 only if some comparator is usable and the oracle behaves. The CI job text is in `test/m0/m0b/ci-image-drift.job.yml` (`classic` and `containerd` matrix); the token that pushed this branch cannot push workflow files, so adding it to `ci.yml` is a [maintainer] item. `testdata/` has no image-drift fixture because the check is its own integration test.
+3. **Test it on both stores.** `test/m0/m0b/image-drift.sh` is standalone, prints every comparator, and exits 0 only if some comparator is usable and the oracle behaves. It runs in CI as the `image-drift` job (`classic` and `containerd` matrix) in `ci.yml`. `testdata/` has no image-drift fixture because the check is its own integration test.
 4. **Compose version skew: still not exercised.** Only compose v5.6.0 was installed; the CI matrix covers the other versions.
 
 ### Other changes M2 must handle differently
@@ -204,8 +206,8 @@ The unit test in §6 names only half of the problem ("markers are cleared on sta
 ## 6. Not verified / maintainer items
 
 **[maintainer]**
-- **The VM is not back on the containerd store yet.** `rm /etc/docker/daemon.json` left it on `overlay2` (the daemon found a prior store). Run `captures/m0b/classic-store/20261017T150838Z/switch-back2.sh` (it writes `{"features": {"containerd-snapshotter": true}}`, restarts the daemon and prints `docker info` and `docker images`). The VM now has a `daemon.json` that it did not have at the start of M0b.
-- Add `test/m0/m0b/ci-image-drift.job.yml` to `.github/workflows/ci.yml` (and `test/m0/m0b/selftest.sh` to the `scripts` job): the token cannot push workflow files.
+- ~~The VM is not back on the containerd store yet.~~ `rm /etc/docker/daemon.json` left it on `overlay2` (the daemon found a prior store); `switch-back2.sh` wrote `{"features": {"containerd-snapshotter": true}}` and restarted the daemon. Checked afterwards: `docker info` shows `overlayfs` / containerd snapshotter, the five original images are back, and the container, volume, network and image lists (minus `whalenurse-m0*`) are identical to the start of M0b. The VM now has a `daemon.json` that it did not have at the start of M0b.
+- ~~Add the `image-drift` CI job and the M0b self-test to `ci.yml`~~ Done in the v3.3 commit (the PR was pushed over SSH, which can write workflow files).
 - Review this PR. From M0: question 1 still needs `scan.sh`/`capture.sh` on the real host.
 
 **Not verified**

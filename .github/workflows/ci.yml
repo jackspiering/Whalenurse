@@ -59,6 +59,7 @@ jobs:
           scripts/m0/selftest.sh
           scripts/scrub-fixture --self-test
           test/m0/run.sh selftest
+          test/m0/m0b/selftest.sh
 
   integration:
     name: integration (real Docker, whalenurse-test-* projects only)
@@ -85,3 +86,28 @@ jobs:
       - name: Leftover test projects (should be empty)
         if: always()
         run: docker ps -a --filter label=com.docker.compose.project --format '{{.Names}} {{.Label "com.docker.compose.project"}}' | grep whalenurse-test- || true
+
+  image-drift:
+    name: image-drift check (${{ matrix.store }} store)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [classic, containerd]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select the image store and restart Docker
+        run: |
+          if [ "${{ matrix.store }}" = containerd ]; then
+            echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json
+          else
+            echo '{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}' | sudo tee /etc/docker/daemon.json
+          fi
+          sudo systemctl restart docker
+          docker info --format 'storage driver: {{.Driver}} / {{json .DriverStatus}}'
+      - name: Image drift (M0b scenario 5; whalenurse-m0-b-imgdrift project only)
+        run: test/m0/m0b/image-drift.sh --out "$RUNNER_TEMP/imgdrift-${{ matrix.store }}"
+      - name: Summary
+        if: always()
+        run: cat "$RUNNER_TEMP/imgdrift-${{ matrix.store }}/summary.txt" || true

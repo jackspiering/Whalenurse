@@ -4,13 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-Pre-implementation. The repo currently holds only `README.md`, `LICENSE`, `.gitignore`, `CLAUDE.md` and the plan. The design lives in `docs/PLAN.md` (v3, approved, dated 16 Oct 2026). Milestone H (repo housekeeping) is done; M0 is next. There is no `go.mod`, build, lint or test tooling yet. Don't invent commands. Milestone M1 creates the module (`go mod init github.com/jackspiering/whalenurse`, latest stable Go) and CI.
+Pre-implementation: there is no Go code yet. The design lives in `docs/PLAN.md` (v3.1, which is v3 plus the approved M0 verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping) and M0 (diagnose and verify) are done; **M1 is next**, then M0b, then M2. The M0 results are in `docs/m0-findings.md`.
+
+What exists besides the docs:
+
+- `scripts/m0/`: read-only `scan.sh` and `capture.sh` for the real host, plus `selftest.sh`.
+- `scripts/scrub-fixture`: scrubs raw `docker inspect` and `docker events` output (needs `jq`).
+- `test/m0/`: the experiment runner `run.sh`, the shared guards in `lib.sh`, `exp/e1.sh` … `e9.sh`, `stacks/` and `promote-fixtures.sh`.
+- `testdata/inspect/` and `testdata/events/`: scrubbed M0 fixtures.
+
+There is still no `go.mod`, build, lint or Go test tooling. Don't invent commands. Milestone M1 creates the module (`go mod init github.com/jackspiering/whalenurse`, latest stable Go) and CI.
+
+**M0 self-tests** need no Docker (they use stubs). `scripts/m0/selftest.sh` fails in a fresh checkout until `captures/` exists (it runs `find` on it under `pipefail`), so create it first; it is gitignored:
+
+```
+mkdir -p captures
+scripts/m0/selftest.sh && scripts/scrub-fixture --self-test && test/m0/run.sh selftest
+```
+
+`test/m0/run.sh all` runs the real experiments and needs the maintainer's confirmation of the host first (see Docker host safety below).
 
 whalenurse is a compose-aware self-healer for Docker hosts. For opted-in containers that go unhealthy or stop unexpectedly, it restarts them, then recreates them from the stack's own compose files, then optionally pulls and recreates. It notifies on giving up. It is a single static Go binary that runs as a container (socket mounted) or under systemd.
 
 ## Working protocol (from the plan)
 
-- Work **one milestone at a time, in order: H, M0, M1 … M6**. After each, stop and report what was built, what was verified and how, what is uncertain, and which **[maintainer]** items are open. Wait for review before starting the next.
+- Work **one milestone at a time, in order: H, M0, M1, M0b, M2 … M6**. After each, stop and report what was built, what was verified and how, what is uncertain, and which **[maintainer]** items are open. Wait for review before starting the next.
 - **[maintainer]** items (GitHub settings, anything on the real Docker host) are not yours to do. List them in the report.
 - **Check upstream before relying on facts.** Verify Docker/Compose behavior and dependency versions against current source, docs or releases. Use the latest stable Go and the latest release of each dependency. Record differences from the plan.
 - **If a finding or test contradicts a plan rule, stop and report it.** Don't quietly change the design.
@@ -18,7 +36,7 @@ whalenurse is a compose-aware self-healer for Docker hosts. For opted-in contain
   - Only act on containers in compose projects named `whalenurse-test-*` or `whalenurse-m0-*`.
   - Never stop, restart, recreate, pull, prune or remove anything else.
   - Integration tests and M0 scripts must enforce this in code with a project-name filter that fails closed.
-  - Don't run M0 experiments until the maintainer confirms the host.
+  - Don't run M0 experiments (or the M0b scenarios) until the maintainer confirms the host.
 - **Fixtures:** never commit raw `docker inspect`, `docker events` or `journalctl` output. Raw captures go in `/captures/` (gitignored). Only scrubbed fixtures (via `scripts/scrub-fixture`) go in `testdata/`.
 - Build with `CGO_ENABLED=0`.
 - Lowercase `whalenurse` everywhere: Go module path, GHCR image (`ghcr.io/jackspiering/whalenurse`) and binary.
@@ -42,7 +60,8 @@ internal/config/     env + label parsing
 Cross-cutting design points that span several packages:
 
 - **Events are only triggers.**
-  - Decisions come from inspecting the container after `GRACE`, because Docker event order is unreliable (`stop` emits `kill`, `die`, `stop`).
+  - Decisions come from inspecting the container after `GRACE`, because Docker event order is unreliable. `docker stop` emits `kill`, `stop`, `die` on Engine 29.9.0, and the order differs between operations and Engine versions.
+  - A failed restart-policy restart emits **no event**, so the poll detects it. The poll also re-inspects containers still `restarting` after `GRACE`.
   - `health_status` events are edge-triggered, so the safety poll (default 60s) is the level-triggered backstop.
   - A startup sweep runs after `STARTUP_SETTLE`.
 - **One domain event stream** (`IncidentOpened`, `ActionStarted`, `ActionResult`, `Suspended`, `Recovered`, `Paused`, `TagMoved`, …). Store, notify and API/SSE all subscribe to it, so notifications and history can't disagree.
@@ -56,19 +75,26 @@ Cross-cutting design points that span several packages:
 - **Action-in-flight window:** events for a key that whalenurse is acting on are recorded and attributed to the action, not interpreted. They must not trigger manual-stop markers, clear SUSPENDED or open an incident.
 - **Rule precedence** (`internal/rules`, plan §3.3):
   - Skip rules come first: own container, `compose.oneoff=True`, swarm tasks, not opted in, PAUSED/SUSPENDED.
-  - A non-empty `State.Error` means a failed start. It overrides everything else and splits into a stale-reference cause (recreate) and an "other" cause (start, then recreate).
+  - A non-empty `State.Error` means a failed start. It overrides everything else, and the exit code is never used for it. There are two shapes: a failed first start is `created` + exit 126/127/128, and a failed restart-policy restart is `exited` + the previous run's exit code + `RestartCount` incremented.
+  - The cause splits three ways:
+    - `No such container` (parent recreated): recreate the dependent.
+    - `cannot join network namespace of a non running container` (parent stopped): heal the parent first, then restart the dependent.
+    - "Other" causes (missing bind source, port in use, bad command): start, then recreate.
   - Then unhealthy, crash-loop, and exited handling via `whalenurse.heal-exited`.
   - Keep error-string matching in one place, backed by fixtures, because strings vary by Engine version.
 - **Heal never upgrades by accident.**
   - Every compose `up` uses `--pull never --no-build`.
   - Only the opt-in pull rung may pull.
   - Never use `compose down`, because it removes the shared project network.
-  - The drift guard (config hash, image drift, compose version skew) runs before recreate. Any failure skips the recreate, notifies, and sets SUSPENDED.
-  - `config --hash` is skipped for services that reference another service or container (`network_mode`/`ipc`/`pid`/`volumes_from`), because compose hashes those after resolving them.
+  - The drift guard (config drift, image drift, compose version skew) runs before recreate. Any failure skips the recreate, notifies, and sets SUSPENDED.
+  - Config drift: the primary check is the dry-run oracle, `--dry-run --progress json up -d --no-deps --pull never --no-build <svc>`, where a `Recreate` text for the container means drift. `config --hash` is the fallback when that output can't be parsed.
+  - Both are skipped for services that reference another service or container (`network_mode`/`ipc`/`pid`/`volumes_from`), because compose hashes those after resolving them.
+  - Image drift on the containerd store: compare the `com.docker.compose.image` label with `docker image inspect --platform linux/<arch>` `.Descriptor.digest`. Never use `.Id` or the container's `.Image`: they are index digests, so every container would look drifted. The classic store is still to be verified (M0b, CI).
 - **Dependents (`network_mode: container:<parent>` sidecars) break whenever the parent restarts or recreates.**
-  - On a parent restart, restart dependents via the API, one at a time.
-  - On a parent recreate, recreate the dependents. The path (a non-forced `up` or `--force-recreate`) is decided by M0 experiments E1/E2.
-  - A staleness sweep covers the boot-time race.
+  - On a parent restart (same ID, parent started later), restart dependents via the API, one at a time.
+  - On a parent recreate (parent ID gone), recreate the dependents with the non-forced `up -d --no-deps --pull never --no-build <dep>`. Use `--force-recreate` only if a post-check still finds a stale `NetworkMode` (M0 E1/E2).
+  - **Never API-restart a dependent whose parent ID is gone.** The restart fails and turns a running-but-disconnected dependent into an exited one. M1 logs it as "needs recreate (M2)".
+  - A stale dependent stays `running` with only a loopback interface, so only the staleness sweep (or the parent's `start`/`create` event) finds it. The sweep also covers the boot-time race.
   - While a parent has an open incident or an in-flight action, suppress its dependents' ladders.
   - A dependent never triggers an action on its parent.
 - **Compose binary lookup order:** `WHALENURSE_COMPOSE_BIN`, then the host plugin mounted `:ro` at a fixed path, then the bundled copy. In container mode the stacks root must be mounted at the **identical path** as on the host.
@@ -87,4 +113,4 @@ All env vars are prefixed `WHALENURSE_` (poll interval, grace, cooldown, flap li
 - API endpoints get golden JSON tests, which become the future hub contract.
 - A test must prove env values never appear in dashboard output.
 - Integration tests run in CI against real Docker, and only in `whalenurse-test-*` projects.
-- The CI matrix covers the classic and containerd image stores, and the compose version pinned from M0 plus the latest release.
+- The CI matrix covers the classic and containerd image stores, and compose v5.6.0 (the M0 version), the latest release, and v5.2.0 (the only release with compose bug #13878).

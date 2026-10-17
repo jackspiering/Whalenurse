@@ -297,7 +297,7 @@ Scrubbed with `scripts/scrub-fixture` and checked with `--check` (no `Config.Env
 ## 8. Reproducing
 
 ```
-scripts/m0/selftest.sh && scripts/scrub-fixture --self-test && test/m0/run.sh selftest   # no Docker needed
+scripts/m0/selftest.sh && scripts/scrub-fixture --self-test && test/m0/run.sh selftest   # no Docker needed; works in a fresh checkout
 M0_RUN_ID=run1 test/m0/run.sh all                   # about 8 minutes; E8 observes for M0_E8_WAIT=150s
 M0_RUN_ID=run1 test/m0/promote-fixtures.sh captures/m0-run1 <names…>   # scrub raw fixtures into testdata/
 test/m0/run.sh cleanup                              # down -v on any leftover whalenurse-m0-* project

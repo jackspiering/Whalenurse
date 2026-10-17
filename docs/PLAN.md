@@ -1,11 +1,28 @@
-# whalenurse — implementation plan v3
+# whalenurse — implementation plan v3.1
 
-Status: v3, approved for implementation. Supersedes draft v2. Facts and versions are as of 16 Oct 2026.
+Status: v3.1, approved for implementation. It is v3 plus the M0 verdicts ([m0-findings.md](m0-findings.md) §4), which the maintainer approved on 17 Oct 2026. Supersedes v3. Facts and versions are as of 17 Oct 2026 (16 Oct for the prior-art survey).
 Repo: `github.com/jackspiering/whalenurse` (Go module path, GHCR image and binary are all lowercase).
+
+**Changes in v3.1** (E-numbers are the M0 experiments in [m0-findings.md](m0-findings.md) §3):
+- §3.3: the event-order example is `kill`, `stop`, `die`, and it differs between operations and Engine versions (E9).
+- §3.3 rule 1: a failed first start (`created` + 126/127/128) and a failed restart-policy restart (`exited` + the previous run's exit code, `RestartCount` incremented) are different cases. Rule 1 tests `State.Error` in both and never uses the exit code (E8, E8c, E8d).
+- §3.3 rule 1: a failed restart emits no event, so the poll owns detecting it and re-inspects containers still `restarting` after GRACE (E8, E9).
+- §3.3 rule 1: the stale-reference matching is split by cause. `No such container` (parent recreated) → recreate the dependent. `cannot join network namespace of a non running container` (parent stopped) → heal the parent first, then restart the dependent. The "other" strings are added (E8e, E8c, E8d, E8).
+- §3.3: the exit-code table is corrected, and the scrubber wording describes what `scripts/scrub-fixture` does (E8; findings §4 item 7).
+- §3.5: remedy mapping by staleness condition. A dependent whose parent ID is gone is recreated with the non-forced `up`, and never API-restarted (E1, E2). `--no-deps` is confirmed to suppress `depends_on.restart` (E3).
+- §3.5: compose #13878 is closed, fixed by compose PR #13880, and absent in v5.6.0 (E2a; findings §1).
+- §3.6: the `--dry-run --progress json` oracle is the primary check for non-reference services and parents. `config --hash` is the fallback, and the skip rule stays for all four reference types (E4, E5).
+- §3.6: on the containerd store, image drift compares `com.docker.compose.image` with `docker image inspect --platform linux/<arch>` `.Descriptor.digest`, never `.Id` (E5). The classic store is to be verified in M0b and CI.
+- §3.9: the base image is `gcr.io/distroless/static:nonroot` with `group_add` for the socket's group (E7).
+- §3.7: drift checks 1 and 3 run before the pull; after it, only the digest change is checked (E5: the oracle reports `Recreate` once the image has changed).
+- §6: the CI compose matrix is v5.6.0, the latest release and v5.2.0, the only release with #13878 (findings §1). It runs on both image stores.
+- §7: new milestone M0b between M1 and M2, for the scenarios M0 could not run (findings §6). M1 never applies rung 1 to a dependent whose parent ID is gone (E1).
+- §9: questions 2–5 are answered (E6, E7, E5, E2). Question 1 stays open.
+- Consistency edits with no new decisions: §0 (milestone order), §3.4 (`:ro` confirmed by E6), §6 (unit-test list), §7 M2 (wording).
 
 ## 0. Instructions for Claude Code
 
-- **One milestone at a time, in order:** H, M0, M1 … M6. At the end of each milestone, stop and report:
+- **One milestone at a time, in order:** H, M0, M1, M0b, M2 … M6. At the end of each milestone, stop and report:
   - what you built;
   - what you verified, and how;
   - what is still uncertain;
@@ -104,7 +121,7 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 
 ### 3.3 Decision rules (inspect after the grace period)
 
-**Events are only triggers.** The decision is made by inspecting the container after `GRACE`, because event order is unreliable: `docker stop` emits `kill` → `die` → `stop`.
+**Events are only triggers.** The decision is made by inspecting the container after `GRACE`, because event order is unreliable. For example, `docker stop` emits `kill` → `stop` → `die` on Engine 29.9.0. The order differs between operations and Engine versions.
 
 **Health events are edge-triggered.** Docker emits `health_status` only when the status changes (verified in `daemon/health.go`), so a missed event never repeats. The poll (default 60s) is the level-triggered backstop and applies the same rules.
 
@@ -118,16 +135,28 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
    - swarm tasks (`com.docker.swarm.task.id` present);
    - containers that are not opted in;
    - PAUSED or SUSPENDED keys.
-1. **Non-empty `State.Error` means a failed start.** This rule overrides everything below.
-   - This is hypothesis A, now confirmed in moby source:
+1. **Non-empty `State.Error` means a failed start.** This rule overrides everything below. Test `State.Error != ""` on both `created` and `exited` containers, and never use the exit code to decide.
+   - This is hypothesis A, confirmed in moby source and reproduced on Engine 29.9.0 (E8):
      - A start that fails during a restart-policy restart is **not retried** (`daemon/monitor.go`). Docker logs `failed to restart container` at debug level and `restartmanger wait error` at error level (the misspelling is in the source).
-     - A start that fails during boot-time restore is not retried either; Docker logs `failed to start container` (`daemon.go`).
-   - A failed start sets `State.Error` and the exit code: **126** (EACCES), **127** (command not found / ENOTDIR) or **128** (anything else). Don't expect a `die` event; the container never ran.
+     - A start that fails during boot-time restore is not retried either; Docker logs `failed to start container` (`daemon.go`). Source-checked only; M0b runs it.
+   - There are two shapes:
+     - **Failed first start** (`docker start`, `compose up`): status `created`, `RestartCount` 0, and an exit code of **126** (EACCES), **127** (command not found / ENOTDIR) or **128** (anything else), with `State.Error` set (E8c, E8d). There is no `die` event; the container never ran.
+     - **Failed restart by the restart policy:** status `exited`, `State.Error` set, `RestartCount` incremented, and the exit code is the **previous run's** (for example 1), not 126–128 (E8).
+   - **A failed restart emits no event** (no `die`, no `start`). The only event is the `die` of the earlier run. So the poll owns this detection: every poll applies rule 1, and it re-inspects containers still `restarting` after GRACE, because a retry that fails later is silent (E8, E9).
    - Split by cause. Do the matching in one place, backed by fixtures, because error strings vary by Engine version:
-     - **Stale reference** (`No such container`, joining a network namespace, `network ... not found`): recreate (skip restart).
-     - **Other** (missing bind-mount source, port already allocated, NFS or device not ready): start first, then recreate.
+     - **Stale reference:**
+       - `No such container` (`joining network namespace of container: No such container: <old id>`: the parent was recreated or removed) → recreate the dependent (skip restart; §3.5 gives the command). Restarting it cannot work (E1, E8e).
+       - `cannot join network namespace of a non running container` (the parent is stopped, not removed) → recreating the dependent cannot help until the parent runs. Heal the parent first (§3.5 already suppresses the dependent's ladder while the parent has an incident), then restart the dependent (E8e).
+       - `network ... not found` → recreate. Not reproduced in M0; kept from v3.
+     - **Other** (missing bind-mount source, port already allocated, NFS or device not ready, command not executable): start first, then recreate. Strings seen in M0:
+       - `failed to fulfil mount request: open <path>: no such file or directory` (bind source gone at restart; E8)
+       - `invalid mount config for type "bind": bind source path does not exist: <path>` (at create, with `create_host_path: false`; also seen in the E6 negative control)
+       - `Bind for <addr> failed: port is already allocated` (E8d)
+       - `exec: "<cmd>": stat <cmd>: no such file or directory` (E8c)
+       - `exec: "<cmd>": permission denied` (E8c)
+       - `stat <cmd>: not a directory` (E8c). Docker adds a misleading hint about mounting a directory onto a file; ignore it.
 2. `running` + `unhealthy` → ladder.
-3. `restarting` for longer than `CRASHLOOP_AFTER` (default 5m), or `on-failure:N` exhausted → ladder. A container that was `created` but never started → recreate.
+3. `restarting` for longer than `CRASHLOOP_AFTER` (default 5m), or `on-failure:N` exhausted → ladder. (A container still `restarting` after GRACE is re-inspected on each poll; rule 1 applies when it fails.) A container that was `created` but never started → recreate.
 4. `exited` with no `State.Error` → apply `whalenurse.heal-exited` (`crashed` | `always` | `never`; default `crashed`):
    - **Intended exit:** with restart policy `no` or `on-failure` and exit code 0, the exit was intended. Leave it alone in `crashed` and `never` modes.
    - **`crashed`:** heal if whalenurse saw a `die` **without a preceding `kill`**, or `OOMKilled=true` (also watch the `oom` event). If whalenurse missed the events (it was down):
@@ -139,7 +168,7 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 
 **Manual-stop markers:**
 - A marker is set on a `kill` event outside any in-flight window, and cleared on the next `start` event.
-- A daemon shutdown or reboot emits `kill` for every container. Docker's boot restart (a `start` event) clears those markers. Containers that fail to start at boot have `State.Error`, so rule 1 wins.
+- A daemon shutdown or reboot emits `kill` for every container. Docker's boot restart (a `start` event) clears those markers. Containers that fail to start at boot have `State.Error`, so rule 1 wins. Not run in M0; M0b runs it.
 
 **Startup sweep:** after whalenurse starts (including at host boot), wait `STARTUP_SETTLE` (default 2m), then apply the rules to everything.
 
@@ -148,14 +177,19 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 | Code | Meaning |
 |---|---|
 | 0 | Clean exit |
-| 126 / 127 / 128 + `State.Error` | Failed start |
+| 126 / 127 / 128 + `State.Error`, status `created` | Failed **first** start (126 EACCES, 127 command not found / ENOTDIR, 128 anything else) |
+| any code + `State.Error`, status `exited` | Failed **restart** by the restart policy. The code is the previous run's, so don't read it; show `State.Error` |
 | 137 | SIGKILL: OOM if `OOMKilled`, otherwise `docker kill` or a stop that hit its timeout |
 | 143 | SIGTERM (usually a stop) |
 
 **Fixtures:** every rule gets a unit test with scrubbed `docker inspect` fixtures. The scrubber (`scripts/scrub-fixture`):
 - removes `Config.Env`;
-- replaces label values except `com.docker.compose.*` and `whalenurse.*`;
-- replaces hostnames, IPs, MACs and host mount sources with placeholders.
+- replaces label values except `com.docker.compose.*` and `whalenurse.*`; other label keys are kept;
+- rewrites the path-valued compose labels (`working_dir`, `config_files`, `environment_file`) to `/srv/stacks/<project>[/<file>]`;
+- replaces `Config.Cmd`, `Entrypoint`, `Args`, healthcheck test arguments and health-check log output with `<scrubbed>`, because a raw capture can hold secrets there;
+- replaces hostnames, MACs and host mount sources with placeholders, and every IP except `0.0.0.0` and `127.0.0.1` with `192.0.2.99`. Those two stay so that strings like `Bind for 0.0.0.0:38080 failed` still match;
+- keeps container IDs, so `container:<id>` references still match the parent;
+- has an events mode (whitelisted attributes only, times rebased to 0) and a `--check` leak check.
 
 ### 3.4 Recreate via compose
 
@@ -179,7 +213,7 @@ Log which binary and version is in use at startup, and expose it in `/api/v1/sta
 **Mounts (container mode):**
 - Mount the stacks root at the **identical path**, read-only, e.g. `/opt/stacks:/opt/stacks:ro`.
 - Also mount anything compose reads from outside it: `env_file:` paths with `../`, `include:`/`extends:` files, and file-based `secrets:`/`configs:`.
-- That `:ro` works is still to be confirmed in M0.
+- `:ro` works (E6). Mounting the stacks elsewhere fails, because compose passes the host path to the daemon for relative binds: that is why the path must be identical.
 
 **Fallbacks and restarts:**
 - If compose labels or files are missing or unreadable, skip rung 2 and notify.
@@ -190,39 +224,53 @@ Log which binary and version is in use at startup, and expose it in `/api/v1/sta
 Dependents break whenever their parent is restarted or recreated, by anything: Docker's restart policy, whalenurse, or a manual `compose up`.
 
 - **Discovery:** a dependent is any container whose `HostConfig.NetworkMode` (or IPC/PID mode) is `container:<id-or-name>` pointing at the parent. Compose resolves `service:X` to `container:<id>` at create time.
-- **Parent restart** (same ID): restart dependents via the Docker API, one at a time, with a health wait between each.
+- **Parent restart** (same ID): restart dependents via the Docker API, one at a time, with a health wait between each. The dependent keeps the parent's old namespace until it is restarted (E1 part B). A non-forced `up` does not repair it (E2c).
 - **Parent recreate** (new ID): recreate the dependents.
-  - Preferred, to be verified in M0: `<compose> ... up -d --no-deps --pull never --no-build <dep...>` **without** `--force-recreate`. Current compose (v5.x source) hashes the *resolved* `container:<id>`, so the new parent ID causes a mismatch and compose recreates the dependents itself.
-  - Fallback: `--force-recreate`.
+  - Command: `<compose> ... up -d --no-deps --pull never --no-build <dep...>` **without** `--force-recreate`. Compose hashes the *resolved* `container:<id>`, so the new parent ID causes a mismatch and compose recreates the dependents itself. Confirmed for a running-but-stale dependent and for one that already exited (E2b, E2d).
+  - Use `--force-recreate` only if a post-check still finds a stale `NetworkMode` afterwards.
+- **Remedy by staleness condition** (the two conditions are under *Staleness sweep* below):
+  - *Parent ID gone* (the dependent's `NetworkMode` targets an ID that is not the parent's current ID, or no longer exists) → **recreate** the dependent as above.
+  - *Same ID, parent started later* → **restart** the dependent via the API.
+  - **Never API-restart a dependent whose parent ID is gone.** The restart fails (`joining network namespace of container: No such container`) and turns a running-but-disconnected dependent into an exited one (E1).
 - **Trigger:** a parent `start` or `create` event outside the in-flight window. When the action is whalenurse's own, it runs the dependents step explicitly.
 - **Staleness sweep** (part of the poll and startup sweep). A dependent is stale if either:
   - its `NetworkMode` is `container:<id>` and `<id>` is not the parent's current ID; or
   - the parent's `State.StartedAt` is newer than the dependent's.
-- **At boot:** Docker waits for `container:` network parents using a single shared 5s timer, so dependents can come up before their parent is ready. The startup sweep catches this.
+
+  A stale dependent usually stays `running` with only a loopback interface (E1), so no state-based rule notices it. Only this sweep and the parent's `start`/`create` event find it.
+- **At boot:** Docker waits for `container:` network parents using a single shared 5s timer, so dependents can come up before their parent is ready. The startup sweep catches this. Source-checked only; M0b runs it.
 - **Ordering:** while a parent has an open incident or an in-flight action, suppress its dependents' ladders. Heal the parent first, wait for it to be healthy, then handle the dependents in order.
 - **Reverse case:** a dependent failing on its own never triggers an action on its parent.
 - **Compose behaviors to keep in mind:**
   - `depends_on: {X: {restart: true}}` only applies to explicit compose commands, not to restarts by Docker's restart policy.
-  - From reading the source, `up --no-deps` narrows the project and therefore suppresses `depends_on.restart` (verify in M0).
-  - Compose bug #13878 (open): since v5.2.0, `network_mode: service:` dependents are recreated on *every* `up`. Expect external `create` events when the maintainer runs `compose up`, and treat them as external recreates.
+  - `up --no-deps` narrows the project and therefore suppresses `depends_on.restart` (E3, with positive controls). So the explicit dependents step is needed, and there is no double restart. When dependents are in scope, compose restarts or recreates them *before* the parent is recreated.
+  - Compose bug #13878 (closed): in v5.2.0, `network_mode: service:` dependents were recreated on *every* `up`. It was fixed by compose PR #13880 (29 Jun 2026), which v5.3.0 and later contain, and v5.6.0 does not recreate unchanged dependents (E2a). On v5.2.0, expect external `create` events when the maintainer runs `compose up`, and treat them as external recreates.
 
 ### 3.6 Drift guard (before rung 2, and before rung 3's `up`)
 
 A recreate deploys whatever is on disk and in the local image store *now*. The guard runs three checks:
 
 1. **Config drift:**
-   - Compare `<compose> config --hash=<svc>` with the container's `com.docker.compose.config-hash` label.
-   - Syntax: comma-separated service names, or `'*'` for all; commas are not trimmed. Output: one `<service> <hash>` line per service, sorted.
-   - **Skip this check for services whose `network_mode`/`ipc`/`pid`/`volumes_from` references another service or container.** Compose hashes those *after* resolving the reference to `container:<id>`, but `config --hash` hashes the unresolved form, so they never match (verified in compose source: `execCreateContainer` → `resolveServiceReferences` → `ServiceHash`). For these services, rely on checks 2–3 and on the parent's own check.
-   - M0 evaluates `<compose> --dry-run up -d --no-deps --pull never --no-build <svc>` as a replacement for this check, since it gives compose's own recreate decision. Adopt it only if the output is stable and parseable.
+   - **Primary: the dry-run oracle (E5).** For non-reference services and for parents, run `<compose> ... --dry-run --progress json up -d --no-deps --pull never --no-build <svc>`.
+     - Output is one JSON object per line: `{"id":"Container <name>","status":"Working|Done","text":"<action>"}`.
+     - A `Recreate` text for the service's container means drift. The oracle is compose's own recreate decision, so it covers config drift and image drift together. It does not say why.
+     - It has no side effects: container IDs were unchanged after every dry run in E5.
+     - A stopped container with unchanged config shows `Starting`/`Started` and no `Recreate`, so that is not drift.
+     - The JSON format is a compose implementation detail. The CI compose matrix pins it (§6).
+   - **Fallback: `config --hash`,** used when the oracle's output can't be parsed. Compare `<compose> config --hash=<svc>` with the container's `com.docker.compose.config-hash` label (E4).
+     - Syntax: comma-separated service names, or `'*'` for all; commas are not trimmed. Output: one `<service> <hash>` line per service, sorted.
+   - **Skip this check, oracle and hash both, for services whose `network_mode`/`ipc`/`pid`/`volumes_from` references another service or container.** Compose hashes those *after* resolving the reference to `container:<id>`, but `config --hash` hashes the unresolved form, so they never match, even on a freshly created container (E4: all four reference types; compose source: `execCreateContainer` → `resolveServiceReferences` → `ServiceHash`). The oracle reports `Recreate` for a dependent after its parent was recreated, which is expected rather than drift (E5). For these services, rely on checks 2–3 and on the parent's own check.
 2. **Image drift:**
-   - Compare the image the container runs with what its image reference resolves to locally now. Prefer compose's `com.docker.compose.image` label, the digest compose recorded and uses for its own recreate decision.
-   - Must be correct on both image stores. Fresh Engine v29 installs default to the containerd store, where IDs are index digests.
+   - Compare the image the container runs with what its image reference resolves to locally now, using compose's `com.docker.compose.image` label, the digest compose recorded and uses for its own recreate decision.
+   - The oracle already covers image drift for the services it checks. Run this explicit comparison for the services the oracle skips and whenever the hash fallback is used.
+   - Must be correct on both image stores. Fresh Engine v29 installs default to the containerd store.
+   - **Containerd store (E5):** the label is the *platform manifest digest*. Compare it with `docker image inspect --platform linux/<arch> <ref>` `.Descriptor.digest`. **Never compare with `.Id` or with the container's `.Image`:** those are the index digest, so they never equal the label, and every container would look drifted and be SUSPENDED.
+   - **Classic store:** to verify in M0b and CI. M0 did not test it.
    - Allowed only for rung 3.
 3. **Compose version skew** (only when running the bundled compose fallback):
-   - Compare the container's `com.docker.compose.version` label with the bundled version.
+   - Compare the container's `com.docker.compose.version` label (present; `5.6.0` in the fixtures) with the bundled version.
    - If both the versions and the hashes differ, report "can't verify drift (compose X on host vs Y in whalenurse)".
-   - This is a real risk: v5.5.0 changed image-digest reconciliation and v5.6.0 pinned the hash byte layout.
+   - This is a real risk: v5.5.0 changed image-digest reconciliation and v5.6.0 pinned the hash byte layout. M0 had only one compose version, so skew is exercised by the CI matrix (§6).
 
 **On any failure:** skip the recreate, notify with the specific cause, and set SUSPENDED.
 - If whalenurse itself moved a shared tag (via rung 3 on another service), the message says which service did it and when.
@@ -234,7 +282,9 @@ A recreate deploys whatever is on disk and in the local image store *now*. The g
 Runs only after restart and recreate have failed.
 1. Run `<compose> pull <svc>`.
 2. If the digest is unchanged, skip to notify + SUSPENDED.
-3. If it changed, run drift checks 1 and 3, then `up ... --pull never`, then the dependents step.
+3. If it changed, run `up ... --pull never`, then the dependents step.
+
+Run drift checks 1 and 3 (§3.6) **before** step 1, not after the pull. After a pull that changed the image, the dry-run oracle reports `Recreate` because the image changed (E5), so checking afterwards would block every pull rung. After the pull, only check that the digest changed.
 
 The notification includes:
 - the old digest → new digest;
@@ -255,6 +305,7 @@ Record a "tag moved by whalenurse" entry, because other stacks sharing the tag w
 ### 3.9 Security
 - Mounting `docker.sock` is root-equivalent on the host. Say so in the README.
 - Minimal image with a read-only root filesystem. Only `/data` (store) and `/run` (control socket) are writable.
+- **Base image: `gcr.io/distroless/static:nonroot`** (E7). The statically linked compose plugin runs in it (and in `alpine`). The image runs as uid 65532, which cannot reach the socket by default (`permission denied while trying to connect to the docker API`), so add `group_add` for the socket's group (`stat -c %g /var/run/docker.sock` on the host). There is no shell, so the image's own healthcheck must call the binary.
 - **Dashboard:**
   - Off by default, read-only, no write endpoints (so no CSRF surface).
   - Never render env vars or full inspect output; show only `com.docker.compose.*` and `whalenurse.*` labels.
@@ -359,7 +410,9 @@ internal/config/     env + label parsing
 - `on-failure` + exit 0 is left alone;
 - oneoff containers and swarm tasks are skipped;
 - OOM 137 vs stop 137;
-- failed start (126/127/128 + `State.Error`) and stale-reference classification;
+- failed first start (`created` + 126/127/128 + `State.Error`) and failed restart (`exited` + previous exit code + `State.Error`), both classified by `State.Error` alone;
+- stale-reference classification: `No such container` → recreate; `cannot join network namespace of a non running container` → heal the parent first, then restart the dependent;
+- a container still `restarting` after GRACE is re-inspected by the poll;
 - dependents are suppressed while the parent's incident is open.
 
 **Other tests:**
@@ -377,7 +430,10 @@ internal/config/     env + label parsing
 - dry-run performs no actions;
 - the pull rung, against a local `registry:2`.
 
-**CI matrix:** latest Docker Engine on both the classic and the containerd image store; compose pinned to the version from M0 plus the latest release.
+**CI matrix:** latest Docker Engine on both the classic and the containerd image store, crossed with three compose versions:
+- **v5.6.0**, the version M0 ran on;
+- **the latest release**, floating. It is v5.6.0 today, so the two jobs coincide until a newer release;
+- **v5.2.0**, the only release with compose bug #13878. v5.3.0 (2 Jul 2026) contains the fix, and v5.2.0 (23 Jun) is the only release before the fix (29 Jun). It exercises recreate-on-every-`up` for sidecars, config-hash and dry-run output across versions, and the version-skew check (§3.6).
 
 ## 7. Milestones
 
@@ -421,19 +477,32 @@ internal/config/     env + label parsing
 ### M1 — Heal MVP (restart only)
 - `go mod init github.com/jackspiering/whalenurse` with the latest stable Go.
 - Config parsing for the M1 subset; `internal/docker` with a fake; events stream with reconnect.
-- Poll and startup sweep; rules from §3.3, with every heal action mapped to restart/start in M1.
+- Poll and startup sweep; rules from §3.3, with every heal action mapped to restart/start in M1. One exception: **never apply rung 1 to a dependent whose parent ID is gone** (§3.5: the restart fails and turns a running dependent into an exited one, E1). Log it as "needs recreate (M2)" and take no action. This covers a stale `NetworkMode` and the `No such container` stale-reference error.
 - Skips: own container, oneoff, swarm, not opted in. Also opt-in labels, the action-in-flight window, the state key, rate limit, dry-run, the domain event stream (in memory), `/healthz` and JSON logs.
 - Dockerfile: static binary, minimal image, read-only rootfs. Document socket access (group or root).
 - CI: build, vet, unit tests, integration test (unhealthy container gets restarted; dry-run does nothing).
 - **Done when:** the unit and integration tests pass, and `whalenurse run --dry-run` against a test stack logs the expected decisions.
 
+### M0b — Scenarios M0 could not run (no app code; after M1, must finish before M2)
+
+M0 ran on a VM where the daemon could not be restarted and the journal was not readable (findings §6). M0b closes those gaps. It extends `test/m0` and `scripts/m0`; the safety rules of §0 apply unchanged, and it needs the maintainer's confirmation of the host.
+
+- **[maintainer]** Daemon restart and host reboot (E9's last scenario) on the throwaway VM. Record:
+  - the shutdown `kill` events and how the manual-stop markers (§3.3) clear on Docker's boot restart;
+  - boot-time restore: `failed to start container` is logged and not retried, and `State.Error` is set;
+  - the shared 5s `container:` wait (§3.5), and whether dependents come up before their parent.
+- **[maintainer]** Journal evidence: run `scripts/m0/capture.sh` on a host where `journalctl -u docker` is readable, and confirm `failed to start container` and `restartmanger wait error` appear for E8 and for boot-time restore.
+- **Classic image store:** switch the VM's `daemon.json` to the classic store (**[maintainer]**: needs a daemon restart), and run E5's image-drift part, ideally all of `run.sh`. Confirm what `com.docker.compose.image` holds there (§3.6). CI covers this too, so write the check so that CI can run it.
+- **Engine 29.9.1** (containerd 2.4.2): upgrade the VM (**[maintainer]**: restarts the daemon) and re-run the suite. Findings §1 found no change in 29.9.1 that touches any experiment, so expect no differences.
+- **Done when:** each item has an answer with scrubbed evidence in `docs/m0-findings.md` (a new section) and fixtures in `testdata/`, and §3.3, §3.5 and §3.6 are each marked "confirmed" or "needs change" for what M0b tested. Report anything that contradicts a plan rule before M2 starts.
+
 ### M2 — Compose recreate, escalation and persistence
-- `internal/compose`: binary lookup (§3.4), command builder, `config --hash`, and the dry-run helper if M0 adopted it.
+- `internal/compose`: binary lookup (§3.4), command builder, the dry-run oracle with its `config --hash` fallback (§3.6).
 - The full ladder: cooldown backoff, recovery period, flap limit, SUSPENDED, PAUSED.
 - SQLite store; control socket and CLI (pause/resume/unsuspend/status).
 - `State.Error` classification and the `heal-exited` modes; manual-stop markers.
 - Drift guard (§3.6), including the ref-holding skip.
-- Dependents (§3.5): discovery, ordering, staleness sweep, and the recreate path chosen in M0.
+- Dependents (§3.5): discovery, ordering, staleness sweep, the remedy mapping (recreate via non-forced `up` when the parent ID is gone, API restart otherwise), and the "needs recreate (M2)" cases M1 only logs.
 - **Done when:** the M2 integration tests in §6 pass, and state survives a whalenurse restart.
 
 ### M3 — Notifications
@@ -469,11 +538,11 @@ internal/config/     env + label parsing
   - Revisit this against the Watchtower fork's feature set and the state of compose #13878 before building it.
 
 ## 9. Open questions
-1. What makes the maintainer's stuck containers sit at `Exited (N)`? Most likely hypothesis A; M0 confirms with real captures.
-2. `:ro` stack mounts (E6).
-3. Does the host compose plugin run in the image (E7)?
-4. Should the dry-run plan replace the config-hash check (E5)?
-5. Does compose recreate dependents on a non-forced `up` (E2)?
+1. What makes the maintainer's stuck containers sit at `Exited (N)`? **Open.** Hypothesis A is reproduced (E8) and matches the moby source, but only `scripts/m0/scan.sh` and `capture.sh` on the real host can confirm it. The exit code `docker ps` shows will be the previous run's, not 128.
+2. ~~`:ro` stack mounts?~~ **Answered:** they work, with the stacks root at the identical path. See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9) and [E6](m0-findings.md#e6-recreate-from-a-helper-container-with-the-stacks-directory-ro).
+3. ~~Does the host compose plugin run in the image?~~ **Answered:** yes, in `alpine` and `distroless/static`; a non-root user needs the socket's group. See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9) and [E7](m0-findings.md#e7-does-the-host-compose-plugin-run-in-the-candidate-base-images).
+4. ~~Should the dry-run plan replace the config-hash check?~~ **Answered:** it is the primary check for non-reference services and parents, with `config --hash` as the fallback (§3.6). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9) and [E5](m0-findings.md#e5---dry-run-as-the-recreate-oracle).
+5. ~~Does compose recreate dependents on a non-forced `up`?~~ **Answered:** yes after a parent recreate, no after a parent restart (E2). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9).
 6. Final defaults for grace, cooldown, crash-loop and rate limits (after M0).
 7. Confirm SQLite at the start of M2.
 

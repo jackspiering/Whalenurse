@@ -1,0 +1,189 @@
+[
+  {
+    "Id": "4fa8eab7f0fa17bda766755743773f4c0a84b593eee51dff4f9a052a390cb9d9",
+    "Created": "2026-10-17T15:18:57.946745608Z",
+    "Path": "sh",
+    "Args": [
+      "<scrubbed>",
+      "<scrubbed>"
+    ],
+    "State": {
+      "Status": "created",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 128,
+      "Error": "failed to set up container networking: driver failed programming external connectivity on endpoint whalenurse-m0-e8d-b-1 (f3835af40eee05cce99e99bfc0c73d42e6ca61ae21c66e7240df59106e13270b): Bind for :::38080 failed: port is already allocated",
+      "StartedAt": "0001-01-01T00:00:00Z",
+      "FinishedAt": "0001-01-01T00:00:00Z"
+    },
+    "Image": "sha256:30ecbe1509090b38ef3260f3609d64d8261230464eaa4d235901db496e9647fb",
+    "ResolvConfPath": "/var/lib/docker/containers/4fa8eab7f0fa17bda766755743773f4c0a84b593eee51dff4f9a052a390cb9d9/resolv.conf",
+    "HostnamePath": "/var/lib/docker/containers/4fa8eab7f0fa17bda766755743773f4c0a84b593eee51dff4f9a052a390cb9d9/hostname",
+    "HostsPath": "/var/lib/docker/containers/4fa8eab7f0fa17bda766755743773f4c0a84b593eee51dff4f9a052a390cb9d9/hosts",
+    "LogPath": "/var/lib/docker/containers/4fa8eab7f0fa17bda766755743773f4c0a84b593eee51dff4f9a052a390cb9d9/4fa8eab7f0fa17bda766755743773f4c0a84b593eee51dff4f9a052a390cb9d9-json.log",
+    "Name": "/whalenurse-m0-e8d-b-1",
+    "RestartCount": 0,
+    "Driver": "overlay2",
+    "Platform": "linux",
+    "MountLabel": "",
+    "ProcessLabel": "",
+    "AppArmorProfile": "docker-default",
+    "ExecIDs": null,
+    "HostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {}
+      },
+      "NetworkMode": "whalenurse-m0-e8d_default",
+      "PortBindings": {
+        "8080/tcp": [
+          {
+            "HostIp": "",
+            "HostPort": "38080"
+          }
+        ]
+      },
+      "RestartPolicy": {
+        "Name": "no",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": null,
+      "CgroupnsMode": "private",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": [],
+      "GroupAdd": null,
+      "IpcMode": "private",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": false,
+      "SecurityOpt": null,
+      "UTSMode": "",
+      "UsernsMode": "",
+      "ShmSize": 67108864,
+      "Runtime": "runc",
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 0,
+      "NanoCpus": 0,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "MaskedPaths": [
+        "/proc/acpi",
+        "/proc/asound",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/sys/devices/virtual/powercap",
+        "/sys/firmware"
+      ],
+      "ReadonlyPaths": [
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys",
+        "/proc/sysrq-trigger"
+      ]
+    },
+    "GraphDriver": {
+      "Data": {
+        "ID": "4fa8eab7f0fa17bda766755743773f4c0a84b593eee51dff4f9a052a390cb9d9",
+        "LowerDir": "/var/lib/docker/overlay2/808f5ed2729ba3509ebe3c47ac8e905143ca2e0adffdfc2f466a7a1f75fd5761-init/diff:/var/lib/docker/overlay2/49868920dd1dae79c700d36e28a256d36d646f02547791d9525fc05075ed4a40/diff",
+        "MergedDir": "/var/lib/docker/overlay2/808f5ed2729ba3509ebe3c47ac8e905143ca2e0adffdfc2f466a7a1f75fd5761/merged",
+        "UpperDir": "/var/lib/docker/overlay2/808f5ed2729ba3509ebe3c47ac8e905143ca2e0adffdfc2f466a7a1f75fd5761/diff",
+        "WorkDir": "/var/lib/docker/overlay2/808f5ed2729ba3509ebe3c47ac8e905143ca2e0adffdfc2f466a7a1f75fd5761/work"
+      },
+      "Name": "overlay2"
+    },
+    "Mounts": [],
+    "Config": {
+      "Hostname": "<hostname>",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "ExposedPorts": {
+        "8080/tcp": {}
+      },
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Cmd": [
+        "<scrubbed>",
+        "<scrubbed>",
+        "<scrubbed>"
+      ],
+      "Image": "whalenurse-m0/busybox:1",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "com.docker.compose.config-hash": "fdd5e7cc16fa69aae67245b0595dec9fc4294f0ec1badb644fcdb0337c6b46cd",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "a:service_started:false",
+        "com.docker.compose.image": "sha256:30ecbe1509090b38ef3260f3609d64d8261230464eaa4d235901db496e9647fb",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "whalenurse-m0-e8d",
+        "com.docker.compose.project.config_files": "/srv/stacks/whalenurse-m0-e8d/compose.yaml",
+        "com.docker.compose.project.working_dir": "/srv/stacks/whalenurse-m0-e8d",
+        "com.docker.compose.service": "b",
+        "com.docker.compose.version": "5.6.0"
+      }
+    },
+    "NetworkSettings": {
+      "SandboxID": "",
+      "SandboxKey": "",
+      "Ports": {},
+      "Networks": {}
+    }
+  }
+]

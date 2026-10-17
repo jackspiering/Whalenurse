@@ -484,15 +484,38 @@ internal/config/     env + label parsing
 ```markdown
 # whalenurse
 
-Compose-aware self-healing for Docker hosts. When an opted-in container turns unhealthy or stops unexpectedly, whalenurse restarts it, then recreates it from its own compose files (including `network_mode: service:` dependents), and notifies you when it gives up.
+**Compose-aware self-healing for Docker hosts.**
 
-**Status:** design phase. No code or releases yet. See [docs/PLAN.md](docs/PLAN.md).
+When an opted-in container turns unhealthy, or stops and stays stopped, whalenurse restarts it. If that doesn't help, it recreates it from the stack's own compose files, together with any `network_mode: service:` sidecars that depend on it. If that fails too, it stops trying and tells you why.
 
-Planned: event-driven detection with a safety poll; backoff, flap and rate limits; a drift guard that refuses to recreate from changed compose files or moved image tags; notifications via Shoutrrr (ntfy, Gotify, Discord, Telegram); and an optional read-only dashboard. Single Go binary that runs as a container or under systemd.
+> **Status: design phase.** There is no code or release yet; nothing below works today. The design and milestones are in [docs/PLAN.md](docs/PLAN.md).
 
-**Security:** whalenurse needs the Docker socket, which is root-equivalent on the host.
+## Why
 
-Requires Docker Engine v25 or later and the Docker Compose plugin.
+Docker doesn't restart unhealthy containers. A restart policy also gives up for good when a start fails, which is common at boot when a mount or network isn't ready yet. Existing tools restart containers, but a restart isn't enough when a container has to be recreated, and it leaves sidecars that share its network namespace broken. whalenurse targets that gap:
+
+- **Recreates from your compose files.** It uses the project, files and env file recorded on the container, and never runs `compose down`.
+- **Handles sidecars.** After their parent is restarted or recreated, it brings `network_mode` dependents back in order.
+- **Never upgrades by accident.** A drift guard refuses to recreate when the compose files or the image tag changed since the container was created.
+
+## Planned features
+
+- Opt-in per container with the `whalenurse.enable=true` label
+- Escalation: restart → recreate → optional pull and recreate → notify and suspend
+- Backoff, flap limit, global rate limit, pause (maintenance) mode and dry-run
+- Notifications through Shoutrrr (ntfy, Gotify, Discord, Telegram and more)
+- Optional read-only dashboard and JSON API
+- Single static Go binary that runs as a container or under systemd
+
+## Security
+
+whalenurse needs access to the Docker socket, which is root-equivalent on the host. The dashboard will be off by default and read-only; expose it only on localhost, behind a reverse proxy or on a tailnet.
+
+## Requirements (planned)
+
+- Docker Engine v25 or later
+- The Docker Compose plugin on the host
+- Compose stacks in plain directories on the host
 
 ## License
 
@@ -517,5 +540,5 @@ MIT
 
 ## Appendix C — GitHub About and topics ([maintainer], milestone H)
 
-- **About:** Compose-aware self-healing for Docker: restarts, then recreates unhealthy or stopped containers from their own compose files, including network_mode sidecars. Opt-in via labels. WIP.
+- **About:** Compose-aware self-healing for Docker: restarts unhealthy or stopped containers, then recreates them from their own compose files, including network_mode sidecars. Opt-in via labels. Work in progress.
 - **Topics:** `docker`, `docker-compose`, `self-healing`, `healthcheck`, `autoheal`, `homelab`, `self-hosted`, `golang`

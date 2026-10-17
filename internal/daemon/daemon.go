@@ -55,7 +55,8 @@ type Daemon struct {
 	nextPoll  time.Time
 	sweepAt   time.Time // dependents sweep requested by a parent start/create
 	pend      map[string]pending
-	restSince map[string]time.Time
+	loops     map[string]*loopState
+	lastCount map[string]int
 	warned    map[string]bool
 	idx       index
 
@@ -78,7 +79,8 @@ func New(o Options) *Daemon {
 			Host: o.Config.HostID, BaseCooldown: o.Config.Cooldown, RateLimit: o.Config.RateLimit, DryRun: o.Config.DryRun,
 		}, o.Clock, o.Bus),
 		pend:      map[string]pending{},
-		restSince: map[string]time.Time{},
+		loops:     map[string]*loopState{},
+		lastCount: map[string]int{},
 		warned:    map[string]bool{},
 	}
 	d.started = o.Clock.Now()
@@ -300,25 +302,20 @@ func (d *Daemon) poll(ctx context.Context) {
 	for _, s := range d.idx.all {
 		key := d.keyOf(s)
 		seen[key] = true
-		if s.State == "restarting" {
-			if _, ok := d.restSince[key]; !ok {
-				d.restSince[key] = now
-			}
-		} else {
-			delete(d.restSince, key)
-		}
+		d.trackLoop(key, s.State == "restarting", -1)
 		cfg, _ := config.ParseLabels(s.Labels, d.cfg.Mode)
 		if !cfg.OptedIn {
 			continue
 		}
 		open, _ := d.eng.IncidentOpen(key)
-		if s.State != "running" || s.Health == "unhealthy" || s.Health == "starting" || hasRef(s) || open {
+		if s.State != "running" || s.Health == "unhealthy" || s.Health == "starting" || hasRef(s) || open || d.looping(key) {
 			d.schedule(key, now.Add(d.cfg.Grace))
 		}
 	}
-	for key := range d.restSince {
+	for key := range d.loops {
 		if !seen[key] {
-			delete(d.restSince, key)
+			delete(d.loops, key)
+			delete(d.lastCount, key)
 		}
 	}
 }
@@ -355,7 +352,8 @@ func (d *Daemon) process(ctx context.Context, key string) {
 	t := engine.Target{Key: key}
 	if !ok {
 		d.eng.Forget(t)
-		delete(d.restSince, key)
+		delete(d.loops, key)
+		delete(d.lastCount, key)
 		return
 	}
 	c, err := d.rd.Inspect(ctx, sum.ID)
@@ -371,13 +369,7 @@ func (d *Daemon) process(ctx context.Context, key string) {
 	t.ID, t.Name = c.ID, c.Name
 	now := d.clk.Now()
 
-	if c.Status == "restarting" {
-		if _, ok := d.restSince[key]; !ok {
-			d.restSince[key] = now
-		}
-	} else {
-		delete(d.restSince, key)
-	}
+	loopSince := d.trackLoop(key, c.Status == "restarting", c.RestartCount)
 
 	cfg, warns := config.ParseLabels(c.Labels, d.cfg.Mode)
 	for _, w := range warns {
@@ -389,10 +381,10 @@ func (d *Daemon) process(ctx context.Context, key string) {
 
 	in := rules.Input{
 		Now: now, C: c, Cfg: cfg, CrashloopAfter: d.cfg.CrashloopAfter,
-		Self:            d.o.SelfID != "" && c.ID == d.o.SelfID,
-		Parents:         d.parentsOf(ctx, c),
-		Evidence:        d.eng.Evidence(key),
-		RestartingSince: d.restSince[key],
+		Self:      d.o.SelfID != "" && c.ID == d.o.SelfID,
+		Parents:   d.parentsOf(ctx, c),
+		Evidence:  d.eng.Evidence(key),
+		LoopSince: loopSince,
 	}
 	dec := rules.Classify(in)
 	d.log.Debug("classified", "key", key, "container", c.Name, "class", dec.Class, "action", dec.Action, "reason", dec.Reason)
@@ -514,3 +506,46 @@ func (d *Daemon) parentsOf(ctx context.Context, c docker.Container) []rules.Pare
 	}
 	return out
 }
+
+// ---- crash-loop tracking ---------------------------------------------------------
+
+type loopState struct {
+	since   time.Time // when the loop was first noticed
+	changed time.Time // when it was last seen restarting or its RestartCount rising
+}
+
+// trackLoop records one observation and returns when the container's crash
+// loop began, or zero if it is not looping. A loop is "restarting" or a
+// RestartCount that keeps rising. The restart manager resets its backoff after
+// a run of 10s, so a loop that dies every 15s is almost always `running`: the
+// clock must survive running observations and stop only once the count has
+// been steady for GRACE. count < 0 means unknown (the poll's list has none).
+func (d *Daemon) trackLoop(key string, restarting bool, count int) time.Time {
+	now := d.clk.Now()
+	rising := false
+	if count >= 0 {
+		if last, ok := d.lastCount[key]; ok && count > last {
+			rising = true
+		}
+		d.lastCount[key] = count
+	}
+	l := d.loops[key]
+	if restarting || rising {
+		if l == nil {
+			l = &loopState{since: now}
+			d.loops[key] = l
+		}
+		l.changed = now
+		return l.since
+	}
+	if l != nil && now.Sub(l.changed) >= d.cfg.Grace && count >= 0 {
+		delete(d.loops, key)
+		return time.Time{}
+	}
+	if l != nil {
+		return l.since
+	}
+	return time.Time{}
+}
+
+func (d *Daemon) looping(key string) bool { return d.loops[key] != nil }

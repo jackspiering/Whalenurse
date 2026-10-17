@@ -86,14 +86,14 @@ type Parent struct {
 
 // Input is everything Classify may look at.
 type Input struct {
-	Now             time.Time
-	C               docker.Container
-	Cfg             config.Container
-	CrashloopAfter  time.Duration
-	Self            bool
-	Parents         []Parent // one per container: reference in network_mode, ipc or pid
-	Evidence        Evidence
-	RestartingSince time.Time // when the poll first saw it restarting; zero if unknown
+	Now            time.Time
+	C              docker.Container
+	Cfg            config.Container
+	CrashloopAfter time.Duration
+	Self           bool
+	Parents        []Parent // one per container: reference in network_mode, ipc or pid
+	Evidence       Evidence
+	LoopSince      time.Time // when the daemon first saw it restarting or its RestartCount rising; zero if not looping
 }
 
 // Decision is the result of Classify.
@@ -176,23 +176,33 @@ func classifyState(in Input) Decision {
 }
 
 func classifyRunning(in Input) Decision {
-	switch in.C.Health {
-	case "unhealthy":
+	if in.C.Health == "unhealthy" {
 		return Decision{Class: ClassUnhealthy, Action: ActionRestart, Reason: "healthcheck reports unhealthy"}
+	}
+	// A loop that crashes every ~15s is mostly `running`: the engine resets its
+	// restart backoff after a run of 10s, so it is rarely `restarting` for long.
+	if !in.LoopSince.IsZero() && in.Now.Sub(in.LoopSince) >= in.CrashloopAfter {
+		return crashLoop(in)
+	}
+	switch in.C.Health {
 	case "starting":
 		return Decision{Class: ClassStarting, Action: ActionNone, Reason: "healthcheck still starting"}
 	}
 	return Decision{Class: ClassOK, Action: ActionNone, Reason: "running"}
 }
 
-// Rule 3: restarting for longer than CRASHLOOP_AFTER. The age is measured from
-// when the poll first saw the container restarting, not from StartedAt.
+// Rule 3: restarting, or restarting over and over, for longer than CRASHLOOP_AFTER.
+// The age is measured by the daemon from when it first saw the loop, not from StartedAt.
 func classifyRestarting(in Input) Decision {
-	if in.RestartingSince.IsZero() || in.Now.Sub(in.RestartingSince) < in.CrashloopAfter {
+	if in.LoopSince.IsZero() || in.Now.Sub(in.LoopSince) < in.CrashloopAfter {
 		return Decision{Class: ClassRestarting, Action: ActionNone, Reason: "restarting; not yet a crash loop"}
 	}
+	return crashLoop(in)
+}
+
+func crashLoop(in Input) Decision {
 	return Decision{Class: ClassCrashLoop, Action: ActionRestart,
-		Reason: fmt.Sprintf("restarting for %s (restart count %d)", in.Now.Sub(in.RestartingSince).Round(time.Second), in.C.RestartCount)}
+		Reason: fmt.Sprintf("crash loop for %s (restart count %d)", in.Now.Sub(in.LoopSince).Round(time.Second), in.C.RestartCount)}
 }
 
 // Rules 3 (on-failure exhausted) and 4 (exited without State.Error).

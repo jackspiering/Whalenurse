@@ -1,6 +1,6 @@
 # M1 notes
 
-Decisions, deviations and open points for milestone M1 (restart-only heal MVP) of [PLAN.md](PLAN.md). Nothing here contradicts a plan rule; items marked **decision** fill a gap the plan leaves open.
+Decisions, deviations and open points for milestone M1 (restart-only heal MVP) of [PLAN.md](PLAN.md). Most items fill a gap the plan leaves open. Two are **deviations from the plan text that the maintainer must decide**: decision 2 (§3.2, external `start`) and decision 11 (§3.3 rule 3, crash-loop detection). Neither changes the design's shape, but the protocol is to report rather than quietly change a rule.
 
 ## Upstream check (17 Oct 2026)
 
@@ -23,7 +23,7 @@ Client API as used: `client.New(client.FromEnv)` (negotiation is the default), `
 ## Decisions
 
 1. **Minimal incident state.** Without it the 60s poll would restart an unhealthy container forever. One restart per incident, the cooldown, a re-inspect, then `GaveUp` (in memory). The state clears on recovery (`Recovered`), on an external `create`, or on a `start` after a manual-stop marker. This stands in for M2's SUSPENDED. There is no RECOVERY_PERIOD (the incident closes at the first healthy re-inspect) and no flap limit, so a container that flaps is restarted at most `RATE_LIMIT` times an hour.
-2. **A plain external `start` does not clear `GaveUp`.** The plan says an external `start`/`create` does. A restart-policy restart is also a `start`, so honouring it would re-arm the ladder on every crash-loop cycle. M1 clears on `create`, or on a `start` after a kill marker (someone stopped it, someone started it). Revisit with SUSPENDED in M2.
+2. **DEVIATION from §3.2: a plain external `start` does not clear `GaveUp`.** The plan says an external `start`/`create` does. A restart-policy restart is also a `start`, so honouring it would re-arm the ladder on every crash-loop cycle. M1 clears on `create`, or on a `start` after a kill marker (someone stopped it, someone started it). Revisit with SUSPENDED in M2.
 3. **Manual-stop markers are in memory** (M2 persists them). They exist now because the action-in-flight window must not set them, and because `crashed` mode needs them: an app that exits 1 on SIGTERM would otherwise be restarted after a `docker stop`.
 4. **The rules cover all of §3.3**, including `heal-exited` and `State.Error` classification (which §7 also lists under M2). They are pure, fixture-tested, and M1 maps every heal to `restart`/`start`.
 5. **Rule details the plan leaves open:**
@@ -41,6 +41,7 @@ Client API as used: `client.New(client.FromEnv)` (negotiation is the default), `
 8. **Dry-run is structural:** `run --dry-run` wires a no-op `docker.Actor`. The Docker `Reader` and `Actor` are separate interfaces.
 9. **Fixtures carry no `whalenurse.enable` label**; the rules tests inject opt-in. A test fails if a file in `testdata/inspect` or `testdata/events` has no expected classification, or an expectation names a missing file.
 10. **The events stream** reconnects with `since=<last event time>` and exponential backoff to 30s. `/healthz` fails after the stream has been down for 2x the poll interval (or the loop is silent for 3 polls plus the action timeout).
+11. **DEVIATION from §3.3 rule 3: crash loops are detected by a rising `RestartCount`, not only by `restarting`.** The rule says "`restarting` for longer than CRASHLOOP_AFTER". Moby's restart manager (`daemon/internal/restartmanager`, docker-v29.9.1) resets its backoff to 100ms whenever a run lasted 10s or more, so a container that crashes every 15s is almost always `running`, and a loop of shorter runs alternates `running`/`restarting`. A timer that restarts whenever the container is seen `running` never fires for either. M1 therefore starts the loop clock when a container is seen `restarting` **or** its `RestartCount` is higher than at the previous inspect, keeps it through `running` observations, and clears it once the count has been steady for GRACE. It is fed by `die` events and by the poll. Tests: `TestFastCrashLoopNeverSeenRestarting`, `TestCrashLoopThatAlternatesRunningAndRestarting`, `TestOneRestartIsNotACrashLoop`. M2's recovery period and flap limit should be designed around the same fact: `RestartCount` and `die` events, not `restarting`, are the loop signal. **Please confirm or amend rule 3.**
 
 ## Integration tests and safety
 

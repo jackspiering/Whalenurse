@@ -145,7 +145,7 @@ var scenarios = []scenario{
 	// ---- restarting / crash loops ---------------------------------------------
 	{
 		name: "restarting, first seen a minute ago", fixture: "e8-control-restarting",
-		input: func(in *rules.Input, _ map[string]docker.Container) { in.RestartingSince = in.Now.Add(-time.Minute) },
+		input: func(in *rules.Input, _ map[string]docker.Container) { in.LoopSince = in.Now.Add(-time.Minute) },
 		want:  d(rules.ClassRestarting, rules.ActionNone),
 	},
 	{
@@ -155,21 +155,32 @@ var scenarios = []scenario{
 	{
 		name: "restarting for 10 minutes: crash loop", fixture: "e8-control-restarting",
 		input: func(in *rules.Input, _ map[string]docker.Container) {
-			in.RestartingSince = in.Now.Add(-10 * time.Minute)
+			in.LoopSince = in.Now.Add(-10 * time.Minute)
 		},
 		want: d(rules.ClassCrashLoop, rules.ActionRestart),
 	},
 	{
 		name: "restarting for 10 minutes (always policy)", fixture: "e9-loop-restarting",
 		input: func(in *rules.Input, _ map[string]docker.Container) {
-			in.RestartingSince = in.Now.Add(-10 * time.Minute)
+			in.LoopSince = in.Now.Add(-10 * time.Minute)
 		},
 		want: d(rules.ClassCrashLoop, rules.ActionRestart),
 	},
 	{
+		name: "running between restarts, loop going for 10 minutes", fixture: "e9-loop-restarting",
+		mutate: func(c *docker.Container) { c.Status, c.Restarting = "running", false },
+		input:  func(in *rules.Input, _ map[string]docker.Container) { in.LoopSince = in.Now.Add(-10 * time.Minute) },
+		want:   d(rules.ClassCrashLoop, rules.ActionRestart),
+	},
+	{
+		name: "running, no loop noticed", fixture: "e9-loop-restarting",
+		mutate: func(c *docker.Container) { c.Status, c.Restarting = "running", false },
+		want:   d(rules.ClassOK, rules.ActionNone),
+	},
+	{
 		name: "restarting just under the limit", fixture: "e9-loop-restarting",
 		input: func(in *rules.Input, _ map[string]docker.Container) {
-			in.RestartingSince = in.Now.Add(-5*time.Minute + time.Second)
+			in.LoopSince = in.Now.Add(-5*time.Minute + time.Second)
 		},
 		want: d(rules.ClassRestarting, rules.ActionNone),
 	},

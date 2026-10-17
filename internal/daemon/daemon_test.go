@@ -196,6 +196,65 @@ func TestCrashLoopMeasuredFromFirstSightingAndRestartRung(t *testing.T) {
 	h.wantCalls("restart " + a.ID)
 }
 
+// A real crash loop is mostly `running`: the restart manager resets its backoff
+// after a run of 10s, so these loops are rarely seen `restarting` for long.
+// The crash-loop clock must survive the running observations.
+func TestCrashLoopThatAlternatesRunningAndRestarting(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	a := h.running(hexID("a1"), "p", "loop", config.LabelHealExited, "never")
+	h.tick()
+	count := 0
+	for i := 0; i < 12; i++ {
+		count++
+		c := h.set(a.ID, func(c *docker.Container) {
+			c.Status, c.Running, c.Restarting, c.RestartPolicy, c.RestartCount = "restarting", true, true, "always", count
+		})
+		h.event(c, "die", "") // every cycle ends a run with a die
+		h.advance(50 * time.Second)
+		h.set(a.ID, func(c *docker.Container) { c.Status, c.Restarting = "running", false })
+		h.advance(10 * time.Second)
+		if i < 3 && len(h.fake.Calls()) != 0 {
+			t.Fatalf("restarted after only %d minutes", i+1)
+		}
+	}
+	if len(h.fake.CallsOn(a.ID)) == 0 {
+		t.Fatalf("a loop that alternates running/restarting for 12 minutes was never healed: %v", h.rec.Types())
+	}
+}
+
+func TestFastCrashLoopNeverSeenRestarting(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	a := h.running(hexID("a1"), "p", "loop")
+	h.tick()
+	count := 0
+	var firstCall int
+	for i := 0; i < 40 && firstCall == 0; i++ { // a die every 15s, always `running` when inspected
+		count++
+		c := h.set(a.ID, func(c *docker.Container) { c.RestartPolicy, c.RestartCount = "always", count })
+		h.event(c, "die", "")
+		h.advance(15 * time.Second)
+		if len(h.fake.Calls()) > 0 {
+			firstCall = i + 1
+		}
+	}
+	if firstCall == 0 {
+		t.Fatalf("a 15s crash loop was never healed: %v", h.rec.Types())
+	}
+	if elapsed := time.Duration(firstCall) * 15 * time.Second; elapsed < 5*time.Minute || elapsed > 8*time.Minute {
+		t.Fatalf("healed after %s, want just after CRASHLOOP_AFTER (5m)", elapsed)
+	}
+}
+
+func TestOneRestartIsNotACrashLoop(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	a := h.running(hexID("a1"), "p", "web")
+	h.tick()
+	c := h.set(a.ID, func(c *docker.Container) { c.RestartPolicy, c.RestartCount = "always", 1 })
+	h.event(c, "die", "")
+	h.advance(15 * time.Minute)
+	h.wantCalls()
+}
+
 // ---- dry-run is structural ------------------------------------------------------------
 
 func TestDryRunPerformsNoMutation(t *testing.T) {

@@ -27,7 +27,7 @@ for e in E1 E2 E3 E4 E5 E6 E7 E8 E9; do
     same=$((same + 1))
   else
     echo "$e: DIFFERENT"
-    diff -u <(norm "$fa") <(norm "$fb") | head -40 | sed 's/^/    /'
+    { diff -u <(norm "$fa") <(norm "$fb") || true; } | head -40 | sed "s/^/    /"
     differ=$((differ + 1))
   fi
 done

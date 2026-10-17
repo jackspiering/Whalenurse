@@ -14,6 +14,7 @@ Repo: `github.com/jackspiering/whalenurse` (Go module path, GHCR image and binar
 - §3.6: the `--dry-run --progress json` oracle is the primary check for non-reference services and parents. `config --hash` is the fallback, and the skip rule stays for all four reference types (E4, E5).
 - §3.6: on the containerd store, image drift compares `com.docker.compose.image` with `docker image inspect --platform linux/<arch>` `.Descriptor.digest`, never `.Id` (E5). The classic store is to be verified in M0b and CI.
 - §3.9: the base image is `gcr.io/distroless/static:nonroot` with `group_add` for the socket's group (E7).
+- §3.7: drift checks 1 and 3 run before the pull; after it, only the digest change is checked (E5: the oracle reports `Recreate` once the image has changed).
 - §6: the CI compose matrix is v5.6.0, the latest release and v5.2.0, the only release with #13878 (findings §1). It runs on both image stores.
 - §7: new milestone M0b between M1 and M2, for the scenarios M0 could not run (findings §6). M1 never applies rung 1 to a dependent whose parent ID is gone (E1).
 - §9: questions 2–5 are answered (E6, E7, E5, E2). Question 1 stays open.
@@ -281,7 +282,9 @@ A recreate deploys whatever is on disk and in the local image store *now*. The g
 Runs only after restart and recreate have failed.
 1. Run `<compose> pull <svc>`.
 2. If the digest is unchanged, skip to notify + SUSPENDED.
-3. If it changed, run drift checks 1 and 3, then `up ... --pull never`, then the dependents step.
+3. If it changed, run `up ... --pull never`, then the dependents step.
+
+Run drift checks 1 and 3 (§3.6) **before** step 1, not after the pull. After a pull that changed the image, the dry-run oracle reports `Recreate` because the image changed (E5), so checking afterwards would block every pull rung. After the pull, only check that the digest changed.
 
 The notification includes:
 - the old digest → new digest;

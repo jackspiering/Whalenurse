@@ -46,6 +46,7 @@ grep -q 'mount source missing' <<<"$out" || fail "scan.sh missed State.Error con
 grep -q '^ok ' <<<"$out" && fail "scan.sh listed a healthy container"
 
 root="$(cd "$here/../.." && pwd)"
+mkdir -p "$root/captures" # gitignored; absent in a fresh checkout
 before=$(find "$root/captures" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
 "$here/capture.sh" web --since 30m >/dev/null
 after=$(find "$root/captures" -mindepth 1 -maxdepth 1 | wc -l)

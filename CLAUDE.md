@@ -15,10 +15,9 @@ What exists besides the docs:
 
 There is still no `go.mod`, build, lint or Go test tooling. Don't invent commands. Milestone M1 creates the module (`go mod init github.com/jackspiering/whalenurse`, latest stable Go) and CI.
 
-**M0 self-tests** need no Docker (they use stubs). `scripts/m0/selftest.sh` fails in a fresh checkout until `captures/` exists (it runs `find` on it under `pipefail`), so create it first; it is gitignored:
+**M0 self-tests** need no Docker (they use stubs) and work in a fresh checkout:
 
 ```
-mkdir -p captures
 scripts/m0/selftest.sh && scripts/scrub-fixture --self-test && test/m0/run.sh selftest
 ```
 

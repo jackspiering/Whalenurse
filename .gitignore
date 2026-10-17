@@ -31,3 +31,15 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Build output
+/whalenurse
+/dist/
+
+# Local runtime state
+/data/
+*.db
+*.sqlite*
+
+# Raw M0 captures (docker inspect/events/journal). Scrub before moving into testdata/.
+/captures/

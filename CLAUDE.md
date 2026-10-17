@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-Pre-implementation. The repo currently holds only `README.md`, `LICENSE` and `.gitignore`. The design lives in `PLAN.md` (v3, approved, dated 16 Oct 2026). Milestone H commits it as `docs/PLAN.md`, so read it there once it exists. There is no `go.mod`, build, lint or test tooling yet. Don't invent commands. Milestone M1 creates the module (`go mod init github.com/jackspiering/whalenurse`, latest stable Go) and CI.
+Pre-implementation. The repo currently holds only `README.md`, `LICENSE`, `.gitignore`, `CLAUDE.md` and the plan. The design lives in `docs/PLAN.md` (v3, approved, dated 16 Oct 2026). Milestone H (repo housekeeping) is done; M0 is next. There is no `go.mod`, build, lint or test tooling yet. Don't invent commands. Milestone M1 creates the module (`go mod init github.com/jackspiering/whalenurse`, latest stable Go) and CI.
 
 whalenurse is a compose-aware self-healer for Docker hosts. For opted-in containers that go unhealthy or stop unexpectedly, it restarts them, then recreates them from the stack's own compose files, then optionally pulls and recreates. It notifies on giving up. It is a single static Go binary that runs as a container (socket mounted) or under systemd.
 

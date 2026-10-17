@@ -4,7 +4,7 @@
 
 When an opted-in container turns unhealthy, or stops and stays stopped, whalenurse restarts it. If that doesn't help, it recreates it from the stack's own compose files, together with any `network_mode: service:` sidecars that depend on it. If that fails too, it stops trying and tells you why.
 
-> **Status: design phase.** There is no code or release yet; nothing below works today. The design and milestones are in [docs/PLAN.md](docs/PLAN.md).
+> **Status: M1 (restart-only heal MVP) is built; nothing is released yet.** `whalenurse run` restarts opted-in containers that go unhealthy or stop; recreate-from-compose, persistence, notifications and the dashboard are still planned. See [docs/running.md](docs/running.md) for what works today and [docs/PLAN.md](docs/PLAN.md) for the design and milestones.
 
 ## Why
 

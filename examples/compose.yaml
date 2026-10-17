@@ -1,0 +1,22 @@
+# whalenurse M1: restart-only healing. Replace GID with the group of the Docker socket:
+#   stat -c %g /var/run/docker.sock
+services:
+  whalenurse:
+    image: ghcr.io/jackspiering/whalenurse:latest # not published until M6; build it with `docker build -t whalenurse .`
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    group_add: ["GID"] # the image runs as uid 65532, which cannot read the socket otherwise
+    tmpfs:
+      - /run:uid=65532,gid=65532,mode=0700 # the control socket (the image's healthcheck) lives here
+    volumes:
+      # Root-equivalent access to the host. Read docs/running.md.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WHALENURSE_DRY_RUN: "true" # log decisions only; remove once they look right
+
+  # An opted-in container: whalenurse restarts it when it turns unhealthy.
+  # example:
+  #   labels:
+  #     whalenurse.enable: "true"

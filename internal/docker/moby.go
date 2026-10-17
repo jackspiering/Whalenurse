@@ -1,0 +1,189 @@
+package docker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/events"
+	"github.com/moby/moby/client"
+)
+
+// Moby implements Client on top of the moby client. API version negotiation is
+// the client default.
+type Moby struct {
+	c *client.Client
+}
+
+// NewMoby connects using the standard DOCKER_HOST environment.
+func NewMoby() (*Moby, error) {
+	c, err := client.New(client.FromEnv)
+	if err != nil {
+		return nil, err
+	}
+	return &Moby{c: c}, nil
+}
+
+func (m *Moby) Close() error { return m.c.Close() }
+
+func (m *Moby) Ping(ctx context.Context) error {
+	_, err := m.c.Ping(ctx, client.PingOptions{})
+	return err
+}
+
+func (m *Moby) List(ctx context.Context) ([]Summary, error) {
+	res, err := m.c.ContainerList(ctx, client.ContainerListOptions{All: true})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Summary, 0, len(res.Items))
+	for _, it := range res.Items {
+		s := Summary{
+			ID:          it.ID,
+			Labels:      it.Labels,
+			State:       string(it.State),
+			NetworkMode: it.HostConfig.NetworkMode,
+			Created:     time.Unix(it.Created, 0),
+		}
+		if len(it.Names) > 0 {
+			s.Name = strings.TrimPrefix(it.Names[0], "/")
+		}
+		if it.Health != nil && it.Health.Status != container.NoHealthcheck {
+			s.Health = string(it.Health.Status)
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func (m *Moby) Inspect(ctx context.Context, ref string) (Container, error) {
+	res, err := m.c.ContainerInspect(ctx, ref, client.ContainerInspectOptions{})
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return Container{}, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		}
+		return Container{}, err
+	}
+	return fromInspect(res.Container), nil
+}
+
+func (m *Moby) Restart(ctx context.Context, id string) error {
+	_, err := m.c.ContainerRestart(ctx, id, client.ContainerRestartOptions{})
+	return err
+}
+
+func (m *Moby) Start(ctx context.Context, id string) error {
+	_, err := m.c.ContainerStart(ctx, id, client.ContainerStartOptions{})
+	return err
+}
+
+func (m *Moby) Events(ctx context.Context, since time.Time) Stream {
+	opts := client.EventsListOptions{Filters: client.Filters{}.Add("type", string(events.ContainerEventType))}
+	if !since.IsZero() {
+		opts.Since = fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond())
+	}
+	res := m.c.Events(ctx, opts)
+	out := make(chan Event)
+	go func() {
+		defer close(out)
+		for msg := range res.Messages {
+			select {
+			case out <- fromMessage(msg):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return Stream{Events: out, Err: res.Err}
+}
+
+func fromMessage(msg events.Message) Event {
+	ev := Event{
+		ID:     msg.Actor.ID,
+		Labels: msg.Actor.Attributes,
+		Name:   msg.Actor.Attributes["name"],
+		Signal: msg.Actor.Attributes["signal"],
+	}
+	ev.Action, ev.Detail, _ = strings.Cut(string(msg.Action), ": ")
+	if v, ok := msg.Actor.Attributes["exitCode"]; ok {
+		if _, err := fmt.Sscanf(v, "%d", &ev.ExitCode); err == nil {
+			ev.HasExit = true
+		}
+	}
+	switch {
+	case msg.TimeNano != 0:
+		ev.Time = time.Unix(0, msg.TimeNano)
+	case msg.Time != 0:
+		ev.Time = time.Unix(msg.Time, 0)
+	}
+	return ev
+}
+
+func fromInspect(r container.InspectResponse) Container {
+	c := Container{ID: r.ID, Name: strings.TrimPrefix(r.Name, "/"), RestartCount: r.RestartCount, Created: parseTime(r.Created)}
+	if r.Config != nil {
+		c.Labels = r.Config.Labels
+	}
+	if s := r.State; s != nil {
+		c.Status = string(s.Status)
+		c.Running, c.Paused, c.Restarting, c.OOMKilled = s.Running, s.Paused, s.Restarting, s.OOMKilled
+		c.ExitCode, c.Error = s.ExitCode, s.Error
+		c.StartedAt, c.FinishedAt = parseTime(s.StartedAt), parseTime(s.FinishedAt)
+		if s.Health != nil {
+			c.Health = string(s.Health.Status)
+		}
+	}
+	if h := r.HostConfig; h != nil {
+		c.RestartPolicy = string(h.RestartPolicy.Name)
+		c.MaxRetries = h.RestartPolicy.MaximumRetryCount
+		c.NetworkMode, c.IpcMode, c.PidMode = string(h.NetworkMode), string(h.IpcMode), string(h.PidMode)
+	}
+	return c
+}
+
+func parseTime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil || t.Year() <= 1 {
+		return time.Time{}
+	}
+	return t
+}
+
+// ParseInspect decodes `docker inspect` output (an array, or a single object)
+// through the real moby types. Used for fixtures.
+func ParseInspect(raw []byte) (Container, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) > 0 && raw[0] == '[' {
+		var arr []container.InspectResponse
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return Container{}, err
+		}
+		if len(arr) != 1 {
+			return Container{}, fmt.Errorf("expected one container, got %d", len(arr))
+		}
+		return fromInspect(arr[0]), nil
+	}
+	var one container.InspectResponse
+	if err := json.Unmarshal(raw, &one); err != nil {
+		return Container{}, err
+	}
+	return fromInspect(one), nil
+}
+
+// ParseEvent decodes one line of `docker events --format '{{json .}}'`.
+func ParseEvent(line []byte) (Event, error) {
+	var msg events.Message
+	if err := json.Unmarshal(line, &msg); err != nil {
+		return Event{}, err
+	}
+	if msg.Type != events.ContainerEventType {
+		return Event{}, errors.New("not a container event")
+	}
+	return fromMessage(msg), nil
+}

@@ -67,6 +67,7 @@ $dirty"
   echo "== building the binary from commit $sha (CGO_ENABLED=0)"
   (cd "$M0B_ROOT" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=m0b-$sha" -o "$ctx/whalenurse" ./cmd/whalenurse)
   docker image inspect gcr.io/distroless/static:nonroot >/dev/null 2>&1 || m0_pull gcr.io/distroless/static:nonroot
+  chmod 755 "$ctx" "$ctx/data" "$ctx/whalenurse" # m0b_state_new sets umask 077; the nonroot user in the image must be able to exec it
   sed -n '/^FROM gcr.io\/distroless\/static:nonroot$/,$p' "$M0B_ROOT/Dockerfile" |
     sed -e 's|^COPY --from=build /out/whalenurse /whalenurse$|COPY whalenurse /whalenurse|' \
       -e 's|^COPY --from=build --chown=65532:65532 /out/data /data$|COPY --chown=65532:65532 data /data|' >"$ctx/Dockerfile"

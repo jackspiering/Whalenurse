@@ -22,11 +22,19 @@ type harness struct {
 	rec  *engine.Recorder
 	d    *Daemon
 	ctx  context.Context
+	cfg  config.Global
+	act  docker.Actor
 }
 
 // newHarness builds a daemon on a fake clock and a fake Docker. Startup settle
 // is zero, so the first Tick runs the startup sweep.
 func newHarness(t *testing.T, tweak func(*config.Global), actor func(*docker.Fake) docker.Actor) *harness {
+	t.Helper()
+	return newHarnessOpts(t, tweak, actor, nil)
+}
+
+// newHarnessOpts is newHarness with a hook on the daemon Options (a store, a boot id).
+func newHarnessOpts(t *testing.T, tweak func(*config.Global), actor func(*docker.Fake) docker.Actor, opts func(*Options)) *harness {
 	t.Helper()
 	cfg := config.Defaults()
 	cfg.HostID = host
@@ -35,15 +43,24 @@ func newHarness(t *testing.T, tweak func(*config.Global), actor func(*docker.Fak
 	if tweak != nil {
 		tweak(&cfg)
 	}
-	h := &harness{t: t, fake: docker.NewFake(), clk: clock.NewFake(time.Time{}), rec: &engine.Recorder{}, ctx: context.Background()}
+	h := &harness{t: t, fake: docker.NewFake(), clk: clock.NewFake(time.Time{}), rec: &engine.Recorder{}, ctx: context.Background(), cfg: cfg}
+	h.act = h.fake
+	if actor != nil {
+		h.act = actor(h.fake)
+	}
+	h.start(opts)
+	return h
+}
+
+// start (re)builds the daemon on the same fake Docker and clock, as a restart of the process would.
+func (h *harness) start(opts func(*Options)) {
 	bus := &engine.Bus{}
 	bus.Subscribe(h.rec.Record)
-	var act docker.Actor = h.fake
-	if actor != nil {
-		act = actor(h.fake)
+	o := Options{Config: h.cfg, Reader: h.fake, Actor: h.act, Clock: h.clk, Bus: bus}
+	if opts != nil {
+		opts(&o)
 	}
-	h.d = New(Options{Config: cfg, Reader: h.fake, Actor: act, Clock: h.clk, Bus: bus})
-	return h
+	h.d = New(o)
 }
 
 // advance moves the clock and ticks once per second, as Run does.
@@ -127,13 +144,17 @@ func TestUnhealthyIsRestartedOnceThenGivenUp(t *testing.T) {
 	// the 60s poll must not restart it again and again.
 	h.advance(10 * time.Minute)
 	h.wantCalls("restart " + a.ID)
-	if h.count(engine.RungUnavailable) != 1 || h.count(engine.GaveUp) != 1 {
+	if h.count(engine.RungUnavailable) != 1 || h.count(engine.Suspended) != 1 {
 		t.Fatalf("want one RungUnavailable and one GaveUp: %v", h.rec.Types())
 	}
 
 	// It recovers by itself: the incident closes.
 	h.set(a.ID, healthy)
 	h.advance(2 * time.Minute)
+	if h.count(engine.Unsuspended) != 1 || h.count(engine.Recovered) != 0 {
+		t.Fatalf("healthy again: SUSPENDED clears at once, the incident only after RECOVERY_PERIOD: %v", h.rec.Types())
+	}
+	h.advance(10 * time.Minute)
 	if h.count(engine.Recovered) != 1 {
 		t.Fatalf("want Recovered: %v", h.rec.Types())
 	}
@@ -183,17 +204,17 @@ func TestPollDetectsFailedRestartWithNoEvent(t *testing.T) {
 	h.wantCalls("start " + a.ID)
 }
 
-func TestCrashLoopMeasuredFromFirstSightingAndRestartRung(t *testing.T) {
+// A container that stays `restarting` with RestartCount never rising is not a crash loop under the §3.3
+// rule: the loop signal is RestartCount rising, not the status (M1 treated it as one; M2a replaces that).
+func TestRestartingWithoutRisingCountIsNotACrashLoop(t *testing.T) {
 	h := newHarness(t, nil, nil)
 	a := h.running(hexID("a1"), "p", "loop")
 	h.tick()
 	h.set(a.ID, func(c *docker.Container) {
 		c.Status, c.Running, c.Restarting, c.RestartPolicy = "restarting", true, true, "always"
 	})
-	h.advance(4 * time.Minute)
-	h.wantCalls() // restarting, but not for CRASHLOOP_AFTER yet
-	h.advance(3 * time.Minute)
-	h.wantCalls("restart " + a.ID)
+	h.advance(15 * time.Minute)
+	h.wantCalls()
 }
 
 // A real crash loop is mostly `running`: the restart manager resets its backoff
@@ -488,7 +509,7 @@ func TestExternalRecreateReArmsAfterGivingUp(t *testing.T) {
 	h.tick()
 	h.set(a.ID, unhealthy)
 	h.advance(10 * time.Minute)
-	if h.count(engine.GaveUp) != 1 {
+	if h.count(engine.Suspended) != 1 {
 		t.Fatalf("setup: %v", h.rec.Types())
 	}
 	h.wantCalls("restart " + a.ID)
@@ -602,7 +623,7 @@ func TestActionsLabelWithoutRestart(t *testing.T) {
 	h.set(a.ID, unhealthy)
 	h.advance(2 * time.Minute)
 	h.wantCalls()
-	if h.count(engine.RungUnavailable) != 1 || h.count(engine.GaveUp) != 1 {
+	if h.count(engine.RungUnavailable) != 1 || h.count(engine.Suspended) != 1 {
 		t.Fatalf("%v", h.rec.Types())
 	}
 }
@@ -615,11 +636,11 @@ func TestCooldownLabelOverride(t *testing.T) {
 	h.event(c, "health_status", "unhealthy")
 	h.advance(31 * time.Second)
 	h.advance(2 * time.Minute)
-	if h.count(engine.GaveUp) != 0 {
+	if h.count(engine.Suspended) != 0 {
 		t.Fatalf("gave up before the 3m cooldown: %v", h.rec.Types())
 	}
 	h.advance(90 * time.Second)
-	if h.count(engine.GaveUp) != 1 {
+	if h.count(engine.Suspended) != 1 {
 		t.Fatalf("%v", h.rec.Types())
 	}
 }
@@ -665,7 +686,8 @@ func TestEventStreamReconnectsWithSince(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	out := make(chan docker.Event, 8)
-	go h.d.watchEvents(ctx, out)
+	sig := make(chan streamSignal, 16)
+	go h.d.watchEvents(ctx, out, sig)
 
 	waitFor(t, func() bool { return len(h.fake.Subscriptions()) == 1 })
 	evTime := time.Date(2026, 10, 17, 12, 0, 5, 0, time.UTC)

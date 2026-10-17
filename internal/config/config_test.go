@@ -14,7 +14,8 @@ func TestDefaultsMatchThePlan(t *testing.T) {
 	}
 	if g.HostID != "box" || g.Mode != ModeLabel || g.DryRun || g.PollInterval != 60*time.Second || g.Grace != 30*time.Second ||
 		g.Cooldown != 30*time.Second || g.CrashloopAfter != 5*time.Minute || g.RateLimit != 10 || g.StartupSettle != 2*time.Minute ||
-		g.LogLevel != slog.LevelInfo || g.HTTPAddr != "" {
+		g.LogLevel != slog.LevelInfo || g.HTTPAddr != "" ||
+		g.RecoveryPeriod != 10*time.Minute || g.FlapLimit != 3 || g.FlapWindow != 24*time.Hour || g.DataDir != "/data" || g.HistoryRetention != 30*24*time.Hour {
 		t.Fatalf("%+v", g)
 	}
 }
@@ -23,17 +24,17 @@ func TestEnvOverridesAndErrors(t *testing.T) {
 	g, warns, err := FromEnv([]string{
 		"WHALENURSE_MODE=ALL", "WHALENURSE_DRY_RUN=true", "WHALENURSE_GRACE=5s", "WHALENURSE_RATE_LIMIT=3",
 		"WHALENURSE_LOG_LEVEL=debug", "WHALENURSE_HTTP_ADDR=:8484", "WHALENURSE_STARTUP_SETTLE=0s",
-		"WHALENURSE_FLAP_LIMIT=5", "WHALENURSE_NOTIFY_URLS=ntfy://x", "WHALENURSE_TYPO=1",
+		"WHALENURSE_FLAP_LIMIT=5", "WHALENURSE_FLAP_WINDOW=2d", "WHALENURSE_DATA_DIR=/tmp/x", "WHALENURSE_COMPOSE_BIN=/x", "WHALENURSE_NOTIFY_URLS=ntfy://x", "WHALENURSE_TYPO=1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if g.Mode != ModeAll || !g.DryRun || g.Grace != 5*time.Second || g.RateLimit != 3 || g.LogLevel != slog.LevelDebug ||
-		g.HTTPAddr != ":8484" || g.StartupSettle != 0 {
+		g.HTTPAddr != ":8484" || g.StartupSettle != 0 || g.FlapLimit != 5 || g.FlapWindow != 48*time.Hour || g.DataDir != "/tmp/x" {
 		t.Fatalf("%+v", g)
 	}
 	joined := strings.Join(warns, "|")
-	for _, want := range []string{"WHALENURSE_FLAP_LIMIT is set but not used until M2", "WHALENURSE_NOTIFY_URLS is set but not used until M3", "WHALENURSE_TYPO is not a known variable"} {
+	for _, want := range []string{"WHALENURSE_COMPOSE_BIN is set but not used until M2b", "WHALENURSE_NOTIFY_URLS is set but not used until M3", "WHALENURSE_TYPO is not a known variable"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing warning %q in %v", want, warns)
 		}
@@ -43,7 +44,7 @@ func TestEnvOverridesAndErrors(t *testing.T) {
 		t.Errorf("a warning leaked a variable value: %v", warns)
 	}
 
-	for _, bad := range []string{"WHALENURSE_MODE=nope", "WHALENURSE_GRACE=soon", "WHALENURSE_POLL_INTERVAL=0s", "WHALENURSE_RATE_LIMIT=0", "WHALENURSE_DRY_RUN=maybe", "WHALENURSE_LOG_LEVEL=loud"} {
+	for _, bad := range []string{"WHALENURSE_MODE=nope", "WHALENURSE_GRACE=soon", "WHALENURSE_POLL_INTERVAL=0s", "WHALENURSE_RATE_LIMIT=0", "WHALENURSE_DRY_RUN=maybe", "WHALENURSE_LOG_LEVEL=loud", "WHALENURSE_FLAP_LIMIT=0", "WHALENURSE_RECOVERY_PERIOD=0s"} {
 		if _, _, err := FromEnv([]string{bad}); err == nil {
 			t.Errorf("%s should be rejected", bad)
 		}
@@ -97,5 +98,28 @@ func TestCooldownFor(t *testing.T) {
 	}
 	if got := CooldownFor(base, 3*time.Minute, 0); got != 3*time.Minute {
 		t.Errorf("override: %s", got)
+	}
+}
+
+func TestParseDurationAcceptsDays(t *testing.T) {
+	for in, want := range map[string]time.Duration{"30d": 30 * 24 * time.Hour, "2d12h": 60 * time.Hour, "90m": 90 * time.Minute, "0": 0} {
+		if got, err := ParseDuration(in); err != nil || got != want {
+			t.Errorf("%q = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"d", "x1d", "1dd", "1d3"} {
+		if _, err := ParseDuration(bad); err == nil {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+}
+
+func TestFlapLimitLabel(t *testing.T) {
+	c, w := ParseLabels(map[string]string{LabelEnable: "true", LabelFlapLimit: "7"}, ModeLabel)
+	if c.FlapLimit != 7 || len(w) != 0 {
+		t.Fatalf("%+v %v", c, w)
+	}
+	if c, w := ParseLabels(map[string]string{LabelEnable: "true", LabelFlapLimit: "0"}, ModeLabel); c.FlapLimit != 0 || len(w) != 1 {
+		t.Fatalf("%+v %v", c, w)
 	}
 }

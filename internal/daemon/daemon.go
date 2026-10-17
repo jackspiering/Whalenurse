@@ -1,7 +1,7 @@
 // Package daemon wires the pieces together: it turns Docker events and polls
 // into inspections, asks internal/rules what is wrong, asks internal/engine
-// what to do, and performs rung 1 through the docker.Actor. It runs on one
-// goroutine; Run is the only entry point that blocks.
+// what to do, and performs rung 1 through the docker.Actor. Run drives it from
+// one goroutine; the engine it owns is safe to call from the control socket.
 package daemon
 
 import (
@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +25,18 @@ import (
 // actionTimeout bounds one restart or start call.
 const actionTimeout = 2 * time.Minute
 
+// MetaBootID is the store key the kernel boot id is kept under.
+const MetaBootID = "boot_id"
+
+// BootIDPath is where Linux publishes the boot id (the same value on the host and in a container).
+const BootIDPath = "/proc/sys/kernel/random/boot_id"
+
+// Meta is the key-value part of the store: the persisted boot id.
+type Meta interface {
+	Meta(key string) (string, bool)
+	SetMeta(key, value string)
+}
+
 // Options are the daemon's dependencies.
 type Options struct {
 	Config config.Global
@@ -32,6 +46,15 @@ type Options struct {
 	Bus    *engine.Bus
 	Log    *slog.Logger
 	SelfID string
+
+	// Persist is where the engine keeps its state; nil keeps it in memory (dry-run,
+	// most tests). Snapshot is what was loaded from the store, applied before the
+	// first event. Meta, when set, keeps the boot id.
+	Persist  engine.Persister
+	Snapshot engine.Snapshot
+	Meta     Meta
+	// BootID reads the kernel's boot id; nil reads BootIDPath.
+	BootID func() string
 
 	// ReconnectBackoff is the first wait before resubscribing to events (doubles up to 30s).
 	ReconnectBackoff time.Duration
@@ -50,15 +73,18 @@ type Daemon struct {
 	clk clock.Clock
 	log *slog.Logger
 
-	started   time.Time
-	settled   bool
-	nextPoll  time.Time
-	sweepAt   time.Time // dependents sweep requested by a parent start/create
-	pend      map[string]pending
-	loops     map[string]*loopState
-	lastCount map[string]int
-	warned    map[string]bool
-	idx       index
+	started     time.Time
+	settled     bool
+	settledFlag atomic.Bool // settled, readable from the control socket
+	nextPoll    time.Time
+	sweepAt     time.Time // dependents sweep requested by a parent start/create
+	reconnectAt time.Time // full sweep after a reconnect that followed a lost stream
+	streamLost  bool      // the stream ended and has not been re-established yet
+	streamSeen  bool      // a stream has been established at least once
+	apiDown     bool
+	pend        map[string]pending
+	warned      map[string]bool
+	idx         index
 
 	eventsUp   atomic.Bool
 	eventsDown atomic.Int64 // unix nanos when the stream went down; 0 while up
@@ -73,23 +99,60 @@ func New(o Options) *Daemon {
 	if o.ReconnectBackoff == 0 {
 		o.ReconnectBackoff = time.Second
 	}
+	g := o.Config
 	d := &Daemon{
-		o: o, cfg: o.Config, rd: o.Reader, clk: o.Clock, log: o.Log,
+		o: o, cfg: g, rd: o.Reader, clk: o.Clock, log: o.Log,
 		eng: engine.New(engine.Params{
-			Host: o.Config.HostID, BaseCooldown: o.Config.Cooldown, RateLimit: o.Config.RateLimit, DryRun: o.Config.DryRun,
+			Host: g.HostID, BaseCooldown: g.Cooldown, RateLimit: g.RateLimit, DryRun: g.DryRun,
+			RecoveryPeriod: g.RecoveryPeriod, CrashloopAfter: g.CrashloopAfter, FlapLimit: g.FlapLimit, FlapWindow: g.FlapWindow,
+			Persist: o.Persist,
 		}, o.Clock, o.Bus),
-		pend:      map[string]pending{},
-		loops:     map[string]*loopState{},
-		lastCount: map[string]int{},
-		warned:    map[string]bool{},
+		pend:   map[string]pending{},
+		warned: map[string]bool{},
 	}
+	d.eng.Restore(o.Snapshot)
 	d.started = o.Clock.Now()
 	d.eventsDown.Store(d.started.UnixNano())
 	d.lastTick.Store(d.started.UnixNano())
+	d.checkBoot()
 	return d
 }
 
-// Engine exposes the state machine (read-only use: status, tests).
+// checkBoot compares the kernel's boot id with the one stored with the markers
+// (plan §3.3, mechanism b). A reboot stops whalenurse in the same second as the
+// containers, so a marker can exist with no matching event in this run: if the
+// boot id changed, every marker is dropped and the first STARTUP_SETTLE is a
+// restore window.
+func (d *Daemon) checkBoot() {
+	if d.o.Meta == nil {
+		return
+	}
+	read := d.o.BootID
+	if read == nil {
+		read = readBootID
+	}
+	id := strings.TrimSpace(read())
+	if id == "" {
+		return
+	}
+	prev, had := d.o.Meta.Meta(MetaBootID)
+	d.o.Meta.SetMeta(MetaBootID, id)
+	if had && prev != id {
+		d.log.Info("new boot id: dropping manual-stop markers", "previous", prev, "current", id)
+		d.eng.DropAllMarkers("boot id changed: the host rebooted")
+		d.eng.OpenRestoreWindow(d.cfg.StartupSettle, "new boot id")
+	}
+}
+
+func readBootID() string {
+	b, err := os.ReadFile(BootIDPath)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// Engine exposes the state machine (status, tests).
 func (d *Daemon) Engine() *engine.Engine { return d.eng }
 
 // Healthy reports whether the daemon is working: the events stream is up (or
@@ -109,10 +172,17 @@ func (d *Daemon) Healthy() (bool, string) {
 	return true, "ok"
 }
 
+// streamSignal tells the loop that the events stream ended or came back.
+type streamSignal struct {
+	lost bool
+	at   time.Time
+}
+
 // Run blocks until ctx ends: it subscribes to events (reconnecting) and ticks.
 func (d *Daemon) Run(ctx context.Context) error {
 	evCh := make(chan docker.Event, 256)
-	go d.watchEvents(ctx, evCh)
+	sigCh := make(chan streamSignal, 16)
+	go d.watchEvents(ctx, evCh, sigCh)
 
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -125,23 +195,55 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return ctx.Err()
 		case ev := <-evCh:
 			d.HandleEvent(ctx, ev)
+		case sig := <-sigCh:
+			// Events are delivered before the signal that follows them: drain what is queued.
+			d.drain(ctx, evCh)
+			if sig.lost {
+				d.StreamLost(sig.at)
+			} else {
+				d.StreamConnected()
+			}
 		case <-tick.C:
 			d.Tick(ctx)
 		}
 	}
 }
 
+func (d *Daemon) drain(ctx context.Context, evCh chan docker.Event) {
+	for {
+		select {
+		case ev := <-evCh:
+			d.HandleEvent(ctx, ev)
+		default:
+			return
+		}
+	}
+}
+
 // watchEvents keeps one subscription alive. It resubscribes with since=<last
-// event time> after an error; the poll re-syncs whatever was missed.
-func (d *Daemon) watchEvents(ctx context.Context, out chan<- docker.Event) {
+// event time> after an error and tells the loop when the stream was lost and
+// when it is back; a stream that ends because ctx ended is not a loss.
+func (d *Daemon) watchEvents(ctx context.Context, out chan<- docker.Event, sig chan<- streamSignal) {
 	var since time.Time
 	backoff := d.o.ReconnectBackoff
+	send := func(s streamSignal) bool {
+		select {
+		case sig <- s:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	for ctx.Err() == nil {
 		sctx, cancel := context.WithCancel(ctx)
 		s := d.rd.Events(sctx, since)
 		d.setEvents(true)
 		if backoff > d.o.ReconnectBackoff {
 			d.log.Info("docker events stream reconnected")
+		}
+		if !send(streamSignal{}) {
+			cancel()
+			return
 		}
 		got := false
 	read:
@@ -176,6 +278,9 @@ func (d *Daemon) watchEvents(ctx context.Context, out chan<- docker.Event) {
 		if ctx.Err() != nil {
 			return
 		}
+		if !send(streamSignal{lost: true, at: d.clk.Now()}) {
+			return
+		}
 		d.log.Warn("docker events stream ended; will resubscribe", "error", fmt.Sprint(err), "retry_in", backoff.String())
 		select {
 		case <-time.After(backoff):
@@ -199,8 +304,37 @@ func (d *Daemon) setEvents(up bool) {
 	d.eventsUp.Store(up)
 }
 
-// Tick does all the work that is due: the startup sweep, the poll, and every
-// scheduled inspection.
+// StreamLost is called when the events stream ended for a reason other than
+// whalenurse stopping (plan §3.3, mechanism a). Every manual-stop marker set in
+// the 30 s before it may be the daemon's shutdown kill rather than a person, so
+// those markers are discarded: that container is then judged by rule 4 without
+// evidence, which for a signal exit is notify-only.
+func (d *Daemon) StreamLost(at time.Time) {
+	d.streamLost = true
+	if cleared := d.eng.QuarantineMarkers(at); len(cleared) > 0 {
+		d.log.Info("events stream lost: manual-stop markers set in the last 30s discarded", "count", len(cleared))
+	}
+}
+
+// StreamConnected is called each time a subscription is established. After a
+// lost stream it opens the restore window (mechanism c) and schedules the full
+// sweep that replay with since= can never replace (the new daemon's buffer holds
+// 256 events and never the old daemon's shutdown).
+func (d *Daemon) StreamConnected() {
+	first := !d.streamSeen
+	d.streamSeen = true
+	if first || !d.streamLost {
+		return
+	}
+	d.streamLost = false
+	now := d.clk.Now()
+	d.eng.OpenRestoreWindow(d.cfg.StartupSettle, "reconnected after a lost events stream")
+	d.reconnectAt = now.Add(d.cfg.StartupSettle)
+	d.log.Info("events stream reconnected after a loss; sweeping everything after the settle period", "sweep_at", d.reconnectAt.UTC().Format(time.RFC3339))
+}
+
+// Tick does all the work that is due: the startup sweep, the poll, the sweep
+// after a reconnect, pause expiry and every scheduled inspection.
 func (d *Daemon) Tick(ctx context.Context) {
 	now := d.clk.Now()
 	d.lastTick.Store(now.UnixNano())
@@ -210,6 +344,7 @@ func (d *Daemon) Tick(ctx context.Context) {
 			return
 		}
 		d.settled = true
+		d.settledFlag.Store(true)
 		d.nextPoll = now.Add(d.cfg.PollInterval)
 		d.log.Info("startup settle over; sweeping all containers")
 		d.sweep(ctx)
@@ -217,9 +352,18 @@ func (d *Daemon) Tick(ctx context.Context) {
 		d.nextPoll = now.Add(d.cfg.PollInterval)
 		d.poll(ctx)
 	}
+	if !d.reconnectAt.IsZero() && !now.Before(d.reconnectAt) {
+		d.reconnectAt = time.Time{}
+		d.log.Info("sweeping all containers after the events stream was re-established")
+		d.sweep(ctx)
+	}
 	if !d.sweepAt.IsZero() && !now.Before(d.sweepAt) {
 		d.sweepAt = time.Time{}
 		d.sweepDependents(ctx)
+	}
+	d.eng.ExpirePauses()
+	for _, k := range d.eng.TakeReeval() {
+		d.schedule(k, now)
 	}
 	d.processDue(ctx)
 }
@@ -269,10 +413,30 @@ func (d *Daemon) HandleEvent(ctx context.Context, ev docker.Event) {
 	}
 }
 
+// apiError notes a failed Docker call. While the daemon restores containers
+// the API is unavailable: that means "not ready", never an incident, so the
+// caller just returns and the next poll or the sweep after the reconnect tries again.
+func (d *Daemon) apiError(what string, err error) {
+	if !d.apiDown {
+		d.apiDown = true
+		d.log.Warn("docker API not ready; no incident is opened, will retry", "while", what, "error", err.Error())
+	}
+}
+
+func (d *Daemon) apiOK() {
+	if d.apiDown {
+		d.apiDown = false
+		d.log.Info("docker API is answering again")
+	}
+}
+
 // sweep inspects every container at once, without a grace period: it runs once
-// after STARTUP_SETTLE, which already waited.
+// after STARTUP_SETTLE, and again after every reconnect that follows a lost
+// events stream, and each time it has already waited.
 func (d *Daemon) sweep(ctx context.Context) {
 	if err := d.refresh(ctx); err != nil {
+		// Not ready yet: try again on the next tick instead of waiting a whole poll.
+		d.reconnectAt = d.clk.Now().Add(d.cfg.Grace)
 		return
 	}
 	for _, s := range d.idx.all {
@@ -292,31 +456,21 @@ func (d *Daemon) sweepDependents(ctx context.Context) {
 }
 
 // poll is the level-triggered backstop for edge-triggered events, and the only
-// detector of a failed restart-policy restart (which emits no event).
+// detector of a failed restart-policy restart (which emits no event). It also
+// reads RestartCount of every opted-in container, because a crash loop that
+// whalenurse saw no `die` events for is otherwise invisible (the container list
+// does not carry the count).
 func (d *Daemon) poll(ctx context.Context) {
 	if err := d.refresh(ctx); err != nil {
 		return
 	}
 	now := d.clk.Now()
-	seen := map[string]bool{}
 	for _, s := range d.idx.all {
-		key := d.keyOf(s)
-		seen[key] = true
-		d.trackLoop(key, s.State == "restarting", -1)
 		cfg, _ := config.ParseLabels(s.Labels, d.cfg.Mode)
 		if !cfg.OptedIn {
 			continue
 		}
-		open, _ := d.eng.IncidentOpen(key)
-		if s.State != "running" || s.Health == "unhealthy" || s.Health == "starting" || hasRef(s) || open || d.looping(key) {
-			d.schedule(key, now.Add(d.cfg.Grace))
-		}
-	}
-	for key := range d.loops {
-		if !seen[key] {
-			delete(d.loops, key)
-			delete(d.lastCount, key)
-		}
+		d.schedule(d.keyOf(s), now.Add(d.cfg.Grace))
 	}
 }
 
@@ -352,8 +506,6 @@ func (d *Daemon) process(ctx context.Context, key string) {
 	t := engine.Target{Key: key}
 	if !ok {
 		d.eng.Forget(t)
-		delete(d.loops, key)
-		delete(d.lastCount, key)
 		return
 	}
 	c, err := d.rd.Inspect(ctx, sum.ID)
@@ -362,14 +514,13 @@ func (d *Daemon) process(ctx context.Context, key string) {
 		return
 	}
 	if err != nil {
-		d.log.Error("inspect failed", "key", key, "error", err.Error())
+		d.apiError("inspect "+key, err)
 		d.schedule(key, d.clk.Now().Add(d.cfg.PollInterval))
 		return
 	}
+	d.apiOK()
 	t.ID, t.Name = c.ID, c.Name
 	now := d.clk.Now()
-
-	loopSince := d.trackLoop(key, c.Status == "restarting", c.RestartCount)
 
 	cfg, warns := config.ParseLabels(c.Labels, d.cfg.Mode)
 	for _, w := range warns {
@@ -380,16 +531,24 @@ func (d *Daemon) process(ctx context.Context, key string) {
 	}
 
 	in := rules.Input{
-		Now: now, C: c, Cfg: cfg, CrashloopAfter: d.cfg.CrashloopAfter,
-		Self:      d.o.SelfID != "" && c.ID == d.o.SelfID,
-		Parents:   d.parentsOf(ctx, c),
-		Evidence:  d.eng.Evidence(key),
-		LoopSince: loopSince,
+		Now: now, C: c, Cfg: cfg,
+		Self:     d.o.SelfID != "" && c.ID == d.o.SelfID,
+		Parents:  d.parentsOf(ctx, c),
+		Evidence: d.eng.Evidence(key),
 	}
 	dec := rules.Classify(in)
+	if dec.Class == rules.ClassSkip {
+		d.log.Debug("classified", "key", key, "container", c.Name, "class", dec.Class, "skip", dec.Skip)
+		return
+	}
+	// Rule 3's crash-loop verdict needs memory between inspects, so the engine owns it.
+	obs := engine.Obs{RestartCount: c.RestartCount, FinishedAt: c.FinishedAt, HasHealthcheck: c.Health != ""}
+	if in.Loop = d.eng.Observe(t, obs); in.Loop.Active {
+		dec = rules.Classify(in)
+	}
 	d.log.Debug("classified", "key", key, "container", c.Name, "class", dec.Class, "action", dec.Action, "reason", dec.Reason)
 
-	plan := d.eng.Evaluate(t, dec, cfg)
+	plan := d.eng.Evaluate(t, dec, cfg, obs)
 	if !plan.RecheckAt.IsZero() {
 		d.schedule(key, plan.RecheckAt)
 	}
@@ -412,7 +571,7 @@ func (d *Daemon) execute(ctx context.Context, t engine.Target, c docker.Containe
 		p, err := d.rd.Inspect(ctx, ref)
 		switch {
 		case errors.Is(err, docker.ErrNotFound):
-			d.refuse(t, dec, fmt.Sprintf("container:%s no longer exists; needs recreate (M2), not restarting", docker.ShortID(ref)))
+			d.refuse(t, dec, fmt.Sprintf("container:%s no longer exists; needs recreate (M2b), not restarting", docker.ShortID(ref)))
 			return
 		case err != nil:
 			d.refuse(t, dec, fmt.Sprintf("cannot verify container:%s (%v); not acting", docker.ShortID(ref), err))
@@ -463,9 +622,10 @@ func hasRef(s docker.Summary) bool { return docker.ContainerRef(s.NetworkMode) !
 func (d *Daemon) refresh(ctx context.Context) error {
 	list, err := d.rd.List(ctx)
 	if err != nil {
-		d.log.Error("container list failed", "error", err.Error())
+		d.apiError("container list", err)
 		return err
 	}
+	d.apiOK()
 	idx := index{all: list, byKey: map[string]docker.Summary{}, byID: map[string]docker.Summary{}}
 	for _, s := range list {
 		idx.byID[s.ID] = s
@@ -506,46 +666,3 @@ func (d *Daemon) parentsOf(ctx context.Context, c docker.Container) []rules.Pare
 	}
 	return out
 }
-
-// ---- crash-loop tracking ---------------------------------------------------------
-
-type loopState struct {
-	since   time.Time // when the loop was first noticed
-	changed time.Time // when it was last seen restarting or its RestartCount rising
-}
-
-// trackLoop records one observation and returns when the container's crash
-// loop began, or zero if it is not looping. A loop is "restarting" or a
-// RestartCount that keeps rising. The restart manager resets its backoff after
-// a run of 10s, so a loop that dies every 15s is almost always `running`: the
-// clock must survive running observations and stop only once the count has
-// been steady for GRACE. count < 0 means unknown (the poll's list has none).
-func (d *Daemon) trackLoop(key string, restarting bool, count int) time.Time {
-	now := d.clk.Now()
-	rising := false
-	if count >= 0 {
-		if last, ok := d.lastCount[key]; ok && count > last {
-			rising = true
-		}
-		d.lastCount[key] = count
-	}
-	l := d.loops[key]
-	if restarting || rising {
-		if l == nil {
-			l = &loopState{since: now}
-			d.loops[key] = l
-		}
-		l.changed = now
-		return l.since
-	}
-	if l != nil && now.Sub(l.changed) >= d.cfg.Grace && count >= 0 {
-		delete(d.loops, key)
-		return time.Time{}
-	}
-	if l != nil {
-		return l.since
-	}
-	return time.Time{}
-}
-
-func (d *Daemon) looping(key string) bool { return d.loops[key] != nil }

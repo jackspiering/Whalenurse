@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -372,7 +373,7 @@ func TestKnownGapWhalenurseKilledByTheDaemonShutdownItself(t *testing.T) {
 	h.set(ctrs[key].ID, func(c *docker.Container) { c.Health = "unhealthy" })
 	h.feed(loadEvents(t, "m0b-daemon-restart-boot"))
 	if h.d.Engine().Suspended(key) {
-		t.Skip("gap closed: flip this test to expect SUSPENDED to survive")
+		t.Fatalf("the gap is closed (SUSPENDED survived the restore): flip this test to expect that, and update open question 1 in docs/m2a-notes.md")
 	}
 	t.Log("gap confirmed: the restore's start cleared SUSPENDED because the shutdown kill left a persisted marker")
 }
@@ -598,4 +599,43 @@ func TestControlCommandsAreSafeWhileTheLoopRuns(t *testing.T) {
 		h.advance(5 * time.Second)
 	}
 	<-done
+}
+
+// Events() returns before the daemon has accepted the subscription, so a daemon that is down makes every retry
+// "succeed" for a moment and then fail. Those are not reconnects: no restore window, no sweep, no log spam.
+func TestFailedRetriesDuringAnOutageAreNotReconnects(t *testing.T) {
+	h := newHarness(t, func(c *config.Global) { c.StartupSettle = 2 * time.Minute }, nil)
+	h.d.o.ReconnectBackoff = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan docker.Event, 8)
+	sig := make(chan streamSignal, 64)
+	go h.d.watchEvents(ctx, out, sig)
+
+	waitFor(t, func() bool { return len(h.fake.Subscriptions()) == 1 })
+	h.fake.Emit(docker.Event{Action: "die", ID: "x", Time: time.Now()}) // establishes the stream
+	<-out
+	if s := <-sig; s.lost {
+		t.Fatalf("first signal must be 'connected': %+v", s)
+	}
+	for i := 0; i < 4; i++ { // the daemon is down: each retry fails at once
+		h.fake.BreakStream(fmt.Errorf("connection refused"))
+		waitFor(t, func() bool { return len(h.fake.Subscriptions()) == i+2 })
+	}
+	var lost, connected int
+	for done := false; !done; {
+		select {
+		case s := <-sig:
+			if s.lost {
+				lost++
+			} else {
+				connected++
+			}
+		case <-time.After(200 * time.Millisecond):
+			done = true
+		}
+	}
+	if lost != 1 || connected != 0 {
+		t.Fatalf("one loss and no reconnects expected, got lost=%d connected=%d", lost, connected)
+	}
 }

@@ -220,9 +220,16 @@ func (d *Daemon) drain(ctx context.Context, evCh chan docker.Event) {
 	}
 }
 
+// streamStable is how long a subscription must stay open, without delivering an
+// event, before it counts as established: Events() returns before the daemon
+// has accepted the request, so during an outage every failed retry would
+// otherwise look like a reconnect.
+const streamStable = 2 * time.Second
+
 // watchEvents keeps one subscription alive. It resubscribes with since=<last
 // event time> after an error and tells the loop when the stream was lost and
-// when it is back; a stream that ends because ctx ended is not a loss.
+// when it is back; a stream that ends because ctx ended is not a loss, and a
+// retry that fails before the stream is established is not a reconnect.
 func (d *Daemon) watchEvents(ctx context.Context, out chan<- docker.Event, sig chan<- streamSignal) {
 	var since time.Time
 	backoff := d.o.ReconnectBackoff
@@ -241,17 +248,31 @@ func (d *Daemon) watchEvents(ctx context.Context, out chan<- docker.Event, sig c
 		if backoff > d.o.ReconnectBackoff {
 			d.log.Info("docker events stream reconnected")
 		}
-		if !send(streamSignal{}) {
-			cancel()
-			return
+		established := false
+		establish := func() bool {
+			if established {
+				return true
+			}
+			established = true
+			return send(streamSignal{})
 		}
+		stable := time.NewTimer(streamStable)
 		got := false
 	read:
 		for {
 			select {
+			case <-stable.C:
+				if !establish() {
+					cancel()
+					return
+				}
 			case ev, ok := <-s.Events:
 				if !ok {
 					break read
+				}
+				if !establish() {
+					cancel()
+					return
 				}
 				got = true
 				if ev.Time.After(since) {
@@ -268,6 +289,7 @@ func (d *Daemon) watchEvents(ctx context.Context, out chan<- docker.Event, sig c
 				return
 			}
 		}
+		stable.Stop()
 		cancel()
 		d.setEvents(false)
 		var err error
@@ -278,8 +300,10 @@ func (d *Daemon) watchEvents(ctx context.Context, out chan<- docker.Event, sig c
 		if ctx.Err() != nil {
 			return
 		}
-		if !send(streamSignal{lost: true, at: d.clk.Now()}) {
-			return
+		if established {
+			if !send(streamSignal{lost: true, at: d.clk.Now()}) {
+				return
+			}
 		}
 		d.log.Warn("docker events stream ended; will resubscribe", "error", fmt.Sprint(err), "retry_in", backoff.String())
 		select {

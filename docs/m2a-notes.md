@@ -52,6 +52,7 @@ The static binary is about 19 MB with the SQLite driver (`CGO_ENABLED=0`, no cgo
 - **A restore window opens** after a reconnect that follows a lost stream, and at start when the boot id changed. It does not open at every process start (the plan says "after connecting to a daemon that was down"; see open question 1).
 - **A `kill` inside the restore window** sets no marker and a `start` inside it unsuspends nothing; both are recorded as `RestoreEvent`.
 - **The rate-limit ledger is persisted** (not on the plan's list) so a restart does not refill the budget.
+- **A subscription counts as established only after the first event or 2 s open.** `Events()` returns before the daemon has accepted the request, so during an outage every failed retry would otherwise look like a reconnect (a restore window, a scheduled sweep and log lines each time). A retry that never established is not a loss and not a reconnect (`TestFailedRetriesDuringAnOutageAreNotReconnects`).
 - **Crash-loop timestamps.** An increase is stamped with the previous run's `FinishedAt` when that lies between the two inspects, otherwise with the inspect time. Both only delay the verdict, never bring it forward; detection is within `CRASHLOOP_AFTER + 2 x (POLL_INTERVAL + GRACE)` of the loop's start whatever those are (tested over 3 polls x 4 graces x with/without `die` events).
 - **A count that goes down** (the container was recreated) resets the crash-loop tracker.
 - **`status` shows** only keys with something to show.
@@ -65,7 +66,7 @@ The static binary is about 19 MB with the SQLite driver (`CGO_ENABLED=0`, no cgo
 ## Not verified
 
 - **No real daemon shutdown or reboot with whalenurse running.** The shutdown handling is tested against the M0b fixtures and fake streams; whether the real sequence at shutdown matches (and open question 1) needs a **[maintainer]** run on the throwaway VM: run whalenurse in a container, suspend a crash-looper, `systemctl restart docker`, and check it is still SUSPENDED.
-- The integration tests were not run locally (the plan forbids it); their first run is the CI run of this PR. If one fails in CI, the PR will say which.
+- The integration tests were not run locally (the plan forbids it); CI is their only run. The first run (`39050052452`) passed everything except the two tests that call the new CLI through the built binary, which failed because those calls did not get `WHALENURSE_CONTROL_SOCKET` (a test bug, fixed). The old tests, the ladder test, the control-socket test and `TestImage` (with `/data` as a named volume and the CLI through `docker exec`) passed on both stores on Engine 29.x / compose 5.6.0. The run that counts is the last one on the PR, which the PR description links.
 - A real `docker compose stop` of a project with whalenurse running is covered only by the fixture-based negative test.
 - SQLite under a bind-mounted `/data` with another owner, and on NFS, was not tried.
 

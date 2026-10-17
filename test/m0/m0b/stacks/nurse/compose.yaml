@@ -1,0 +1,39 @@
+# M0b whalenurse-restart: whalenurse in a container (built from this branch) next to a crash-looper that it
+# SUSPENDS. Project whalenurse-m0-b-nurse. vars.env supplies NURSE_IMAGE and DOCKER_GID.
+#
+# Timings are short on purpose; the scenario waits for the SUSPENDED state before it asks for the daemon restart.
+name: whalenurse-m0-b-nurse
+services:
+  whalenurse:
+    image: ${NURSE_IMAGE}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    group_add: ["${DOCKER_GID}"]
+    tmpfs: ["/run:uid=65532,gid=65532,mode=0700"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - data:/data
+    environment:
+      WHALENURSE_HOST_ID: m0b
+      WHALENURSE_MODE: label
+      WHALENURSE_GRACE: 5s
+      WHALENURSE_POLL_INTERVAL: 15s
+      WHALENURSE_COOLDOWN: 10s
+      WHALENURSE_CRASHLOOP_AFTER: 60s
+      WHALENURSE_STARTUP_SETTLE: 30s
+      WHALENURSE_RATE_LIMIT: "100"
+
+  # Exits 1 every ~12 s and is restarted by its restart policy: a crash loop whose runs last over 10 s, so it is
+  # almost always `running` when inspected. whalenurse restarts it once, finds that it did not help, and SUSPENDS it.
+  looper:
+    image: whalenurse-m0/busybox:1
+    restart: always
+    labels:
+      whalenurse.enable: "true"
+    stop_grace_period: 2s
+    command: ["sh", "-c", "sleep 12; exit 1"]
+
+volumes:
+  data: {}

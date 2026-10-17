@@ -8,6 +8,8 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$here/lib.sh"
+# shellcheck source=nurse-lib.sh
+source "$here/nurse-lib.sh"
 command -v jq >/dev/null || { echo "jq is required"; exit 2; }
 
 tmp=$(mktemp -d)
@@ -129,6 +131,40 @@ if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
   [[ "$svcs" == "$want" ]] && ok "boot stack: compose config lists exactly the services in expect.tsv" || bad "boot stack services differ from expect.tsv: $(diff <(echo "$svcs") <(echo "$want") | head -5)"
 else
   echo "skip boot stack config check (no docker compose)"
+fi
+
+# ---- the whalenurse-restart scenario: projects, status and log readers
+for p in "$NURSE_PROJECT" "$NURSE_STOP_PROJECT"; do expect "project $p accepted" m0b_require_project "$p"; done
+cat >"$tmp/status.json" <<'JSON'
+{"host":"m0b","settled":true,"engine":{"restore_window_until":"2020-01-01T00:00:00Z","keys":[
+ {"key":"m0b/whalenurse-m0-b-nurse/looper/1","state":"SUSPENDED","suspend_reason":"ladder","flaps":1},
+ {"key":"m0b/whalenurse-m0-b-nursestop/s1/1","state":"ok","manual_stop":true,"flaps":0}]}}
+JSON
+[[ "$(nurse_state "$tmp/status.json" "$NURSE_LOOPER_KEY")" == SUSPENDED && "$(nurse_state "$tmp/status.json" nope)" == "-" ]] && ok "nurse: state of a key" || bad "nurse_state"
+[[ "$(nurse_field "$tmp/status.json" "$(nurse_key "$NURSE_STOP_PROJECT" s1)" manual_stop)" == true ]] && ok "nurse: field of a key" || bad "nurse_field"
+nurse_restore_open "$tmp/status.json" && bad "a restore window in the past reported open" || ok "nurse: a past restore window is closed"
+sed 's/2020-01-01T00:00:00Z/2099-01-01T00:00:00.123456789Z/' "$tmp/status.json" >"$tmp/status-open.json"
+nurse_restore_open "$tmp/status-open.json" && ok "nurse: a future restore window is open" || bad "future restore window"
+cat >"$tmp/nurse.ndjson" <<'JSON'
+{"time":"2026-10-17T12:00:00.5Z","type":"ManualStopMarked","key":"m0b/whalenurse-m0-b-nursestop/s1/1"}
+{"time":"2026-10-17T12:00:10Z","type":"ManualStopMarked","key":"m0b/whalenurse-m0-b-nursestop/s1/1"}
+{"time":"2026-10-17T12:00:10Z","type":"ActionStarted","key":"m0b/whalenurse-m0-b-nursestop/s2/1"}
+JSON
+k1=$(nurse_key "$NURSE_STOP_PROJECT" s1)
+since=$(date -u -d 2026-10-17T12:00:05Z +%s)
+[[ "$(nurse_count "$tmp/nurse.ndjson" ManualStopMarked "$k1")" == 2 && "$(nurse_count_since "$tmp/nurse.ndjson" ManualStopMarked "$k1" "$since")" == 1 &&
+  "$(nurse_count_since "$tmp/nurse.ndjson" ActionStarted "$k1" "$since")" == 0 ]] && ok "nurse: event counts, total and since a time" || bad "nurse counts"
+if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
+  for st in nurse nursestop; do
+    svcs=$(cd "$tmp" && rm -rf "stack-$st" && mkdir -p "stack-$st" && cp "$here/stacks/$st/compose.yaml" "stack-$st/" &&
+      printf 'NURSE_IMAGE=whalenurse-m0/whalenurse:x\nDOCKER_GID=999\n' >"stack-$st/vars.env" &&
+      docker compose --project-directory "stack-$st" -f "stack-$st/compose.yaml" --env-file "stack-$st/vars.env" config --services 2>&1 | sort | paste -sd' ')
+    case "$st" in nurse) want="looper whalenurse" ;; *) want="s1 s2 s3" ;; esac
+    [[ "$svcs" == "$want" ]] && ok "stack $st: compose config lists $want" || bad "stack $st services: '$svcs'"
+  done
+  # Only opted-in M0b containers: the nurse stack opts in the looper and nothing else, the stop stack its three.
+  [[ "$(grep -c 'whalenurse.enable: "true"' "$here/stacks/nurse/compose.yaml")" == 1 && "$(grep -c 'whalenurse.enable: "true"' "$here/stacks/nursestop/compose.yaml")" == 1 ]] &&
+    ok "stacks: the opt-in labels are where they should be" || bad "opt-in labels"
 fi
 
 ((fail == 0)) && echo "m0b selftest OK" || { echo "m0b selftest FAILED"; exit 1; }

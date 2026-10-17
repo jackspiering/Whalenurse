@@ -1,19 +1,26 @@
 // Package engine holds the per-container state machine: incidents, the ladder,
-// the rate limit, the action-in-flight window and the manual-stop markers.
-// It is pure. It makes no Docker calls and takes its time from an injected
-// clock; the daemon feeds it decisions and performs the actions it returns.
+// SUSPENDED and PAUSED, the flap limit, the crash-loop tracker, the rate limit,
+// the action-in-flight window and the manual-stop markers. It is pure. It makes
+// no Docker calls, opens no file, and takes its time from an injected clock; the
+// daemon feeds it decisions and performs the actions it returns, and a
+// Persister (internal/store) keeps its state across restarts.
 //
-// M1 implements rung 1 (restart) only. The state kept here is in memory and a
-// minimal stand-in for what M2 persists: an incident runs the restart rung
-// once, waits the cooldown, and if the container is still bad it gives up
-// (the GaveUp event; M2's SUSPENDED) until the container recovers, is
-// recreated, or is started by hand after a manual stop.
-// The engine is not safe for concurrent use; the daemon drives it from one goroutine.
+// Rung 2 (recreate) does not exist until M2b. Where the ladder would recreate it
+// records RungUnavailable ("needs recreate (M2b)") and moves on, so an unhealthy
+// container goes restart, then SUSPENDED.
+//
+// The Engine is safe for concurrent use: the daemon loop drives it, and the
+// control socket's commands (pause, resume, unsuspend, status) call it from HTTP
+// goroutines. Events are published while the lock is held, so subscribers must
+// not call back into the Engine.
 package engine
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackspiering/whalenurse/internal/clock"
@@ -22,13 +29,27 @@ import (
 	"github.com/jackspiering/whalenurse/internal/rules"
 )
 
+// Suspension reasons.
+const (
+	ReasonLadder   = "ladder"   // every rung ran and the container is still bad
+	ReasonFlapping = "flapping" // more than FLAP_LIMIT incidents within FLAP_WINDOW
+)
+
+// RecreateRungNote is the text recorded where rung 2 would run.
+const RecreateRungNote = "needs recreate (M2b): the recreate rung does not exist yet"
+
 // Params configures an Engine.
 type Params struct {
-	Host         string
-	BaseCooldown time.Duration
-	RateLimit    int           // actions per hour; 0 disables the limit
-	InflightTail time.Duration // how long after an action its events are still attributed to it
-	DryRun       bool          // only labels events; the no-op actor is wired by the caller
+	Host           string
+	BaseCooldown   time.Duration
+	RecoveryPeriod time.Duration
+	CrashloopAfter time.Duration
+	FlapLimit      int
+	FlapWindow     time.Duration
+	RateLimit      int           // actions per hour; 0 disables the limit
+	InflightTail   time.Duration // how long after an action its events are still attributed to it
+	DryRun         bool          // only labels events; the no-op actor is wired by the caller
+	Persist        Persister     // nil: state lives in memory only
 }
 
 // Target identifies the container an evaluation is about.
@@ -42,7 +63,7 @@ type Target struct {
 type Plan struct {
 	Act       rules.Action // ActionNone, ActionRestart or ActionStart
 	Rung      string
-	RecheckAt time.Time // inspect again then (cooldown); zero for none
+	RecheckAt time.Time // inspect again then (cooldown, recovery period); zero for none
 }
 
 // Result is the outcome of an action.
@@ -58,7 +79,13 @@ type incident struct {
 	class         rules.Class
 	rung          int // index into the configured rungs of the next rung to run
 	cooldownUntil time.Time
-	exhausted     bool
+	spent         bool   // nothing left to try
+	spentReason   string // why: ReasonLadder or ReasonFlapping
+	suspended     bool
+	suspendedAt   time.Time
+	recovering    bool
+	recoverySince time.Time
+	recoveryCount int
 	rateNoted     bool
 }
 
@@ -68,15 +95,29 @@ type keyState struct {
 	tracker  rules.Tracker
 	advisory string // dedupe key of the last advisory event
 	name     string
+	flaps    []time.Time
+	loop     LoopRecord
+	dirty    bool
+}
+
+type pause struct {
+	scope   string
+	until   time.Time
+	created time.Time
 }
 
 // Engine is the state machine for all keys on one host.
 type Engine struct {
-	p     Params
-	clk   clock.Clock
-	bus   *Bus
-	keys  map[string]*keyState
-	spent []time.Time // timestamps of actions in the last hour
+	mu     sync.Mutex
+	p      Params
+	clk    clock.Clock
+	bus    *Bus
+	keys   map[string]*keyState
+	spent  []time.Time // timestamps of actions in the last hour
+	pauses map[string]*pause
+	reeval map[string]bool // keys the daemon should look at now (resume, unsuspend, pause expiry)
+
+	restoreUntil time.Time // a start or kill before this is a restore, not a person
 }
 
 // New creates an Engine that publishes to bus.
@@ -84,7 +125,43 @@ func New(p Params, clk clock.Clock, bus *Bus) *Engine {
 	if p.InflightTail == 0 {
 		p.InflightTail = 2 * time.Second
 	}
-	return &Engine{p: p, clk: clk, bus: bus, keys: map[string]*keyState{}}
+	if p.RecoveryPeriod == 0 {
+		p.RecoveryPeriod = 10 * time.Minute
+	}
+	if p.CrashloopAfter == 0 {
+		p.CrashloopAfter = 5 * time.Minute
+	}
+	if p.FlapLimit == 0 {
+		p.FlapLimit = 3
+	}
+	if p.FlapWindow == 0 {
+		p.FlapWindow = 24 * time.Hour
+	}
+	return &Engine{p: p, clk: clk, bus: bus, keys: map[string]*keyState{}, pauses: map[string]*pause{}, reeval: map[string]bool{}}
+}
+
+// Restore loads persisted state. Call it once, before the engine is used.
+func (e *Engine) Restore(s Snapshot) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, k := range s.Keys {
+		st := &keyState{name: k.Name, loop: k.Loop, flaps: append([]time.Time(nil), k.Flaps...)}
+		if !k.MarkerAt.IsZero() {
+			st.tracker.SetMarker(k.MarkerAt)
+		}
+		if r := k.Incident; r != nil {
+			st.incident = &incident{
+				opened: r.Opened, class: rules.Class(r.Class), rung: r.Rung, cooldownUntil: r.CooldownUntil,
+				spent: r.Spent, spentReason: r.SpentReason, suspended: r.Suspended, suspendedAt: r.SuspendedAt,
+				recovering: r.Recovering, recoverySince: r.RecoverySince, recoveryCount: r.RecoveryCount,
+			}
+		}
+		e.keys[k.Key] = st
+	}
+	for _, p := range s.Pauses {
+		e.pauses[p.Scope] = &pause{scope: p.Scope, until: p.Until, created: p.Created}
+	}
+	e.spent = append(e.spent, s.Actions...)
 }
 
 func (e *Engine) state(key string) *keyState {
@@ -100,14 +177,49 @@ func (e *Engine) emit(t Target, typ EventType, msg string, attrs map[string]stri
 	e.bus.Publish(Event{Time: e.clk.Now(), Host: e.p.Host, Key: t.Key, Container: t.Name, Type: typ, Message: msg, Attrs: attrs})
 }
 
-// Busy reports whether the key has an open incident or an action in flight.
-// The rules use it to hold back the dependents of a busy parent.
+// flush writes the key to the Persister if it changed.
+func (e *Engine) flush(key string, st *keyState) {
+	if !st.dirty || e.p.Persist == nil {
+		st.dirty = false
+		return
+	}
+	st.dirty = false
+	rec := KeyRecord{Key: key, Name: st.name, MarkerAt: st.tracker.MarkedAt(), Loop: st.loop, Flaps: append([]time.Time(nil), st.flaps...)}
+	if inc := st.incident; inc != nil {
+		rec.Incident = &IncidentRecord{
+			Opened: inc.opened, Class: string(inc.class), Rung: inc.rung, CooldownUntil: inc.cooldownUntil,
+			Spent: inc.spent, SpentReason: inc.spentReason, Suspended: inc.suspended, SuspendedAt: inc.suspendedAt,
+			Recovering: inc.recovering, RecoverySince: inc.recoverySince, RecoveryCount: inc.recoveryCount,
+		}
+	}
+	e.p.Persist.SaveKey(rec)
+}
+
+// closeIncident ends the open incident with an outcome and records it in the history.
+func (e *Engine) closeIncident(t Target, st *keyState, outcome string) {
+	inc := st.incident
+	if inc == nil {
+		return
+	}
+	st.incident = nil
+	st.dirty = true
+	if e.p.Persist != nil {
+		e.p.Persist.CloseIncident(ClosedIncident{Key: t.Key, Opened: inc.opened, Closed: e.clk.Now(), Class: string(inc.class), Outcome: outcome})
+	}
+}
+
+// Busy reports whether the key has an open incident that is still being worked,
+// or an action in flight. The rules use it to hold back the dependents of a busy
+// parent. A suspended or recovered (healthy) incident is not busy: nothing is
+// left to wait for.
 func (e *Engine) Busy(key string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	st, ok := e.keys[key]
 	if !ok {
 		return false
 	}
-	if st.incident != nil && !st.incident.exhausted {
+	if inc := st.incident; inc != nil && !inc.suspended && !inc.recovering {
 		return true
 	}
 	for _, w := range st.windows {
@@ -118,17 +230,26 @@ func (e *Engine) Busy(key string) bool {
 	return false
 }
 
-// IncidentOpen reports whether the key has an incident, and whether the ladder
-// gave up on it.
-func (e *Engine) IncidentOpen(key string) (open, gaveUp bool) {
+// IncidentOpen reports whether the key has an incident, and whether it is SUSPENDED.
+func (e *Engine) IncidentOpen(key string) (open, suspended bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if st, ok := e.keys[key]; ok && st.incident != nil {
-		return true, st.incident.exhausted
+		return true, st.incident.suspended
 	}
 	return false, false
 }
 
+// Suspended reports whether the key is SUSPENDED.
+func (e *Engine) Suspended(key string) bool {
+	_, s := e.IncidentOpen(key)
+	return s
+}
+
 // Evidence returns what the events so far say about how the key stopped.
 func (e *Engine) Evidence(key string) rules.Evidence {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if st, ok := e.keys[key]; ok {
 		return st.tracker.Evidence()
 	}
@@ -137,19 +258,86 @@ func (e *Engine) Evidence(key string) rules.Evidence {
 
 // Forget drops all state for a key whose container no longer exists.
 func (e *Engine) Forget(t Target) {
-	if st, ok := e.keys[t.Key]; ok {
-		if st.incident != nil {
-			e.emit(t, IncidentClosed, "container is gone", map[string]string{"reason": "gone"})
-		}
-		delete(e.keys, t.Key)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st, ok := e.keys[t.Key]
+	if !ok {
+		return
 	}
+	if st.incident != nil {
+		e.emit(t, IncidentClosed, "container is gone", map[string]string{"reason": "gone"})
+		e.closeIncident(t, st, "gone")
+	}
+	delete(e.keys, t.Key)
+	if e.p.Persist != nil {
+		e.p.Persist.DeleteKey(t.Key)
+	}
+}
+
+// ---- Docker events, markers, the restore window ---------------------------------------------
+
+// OpenRestoreWindow starts (or extends) a window in which a `start` is a restore
+// and a `kill` sets no marker: the daemon was down and is bringing containers
+// back (plan §3.3, mechanism c).
+func (e *Engine) OpenRestoreWindow(d time.Duration, why string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	until := e.clk.Now().Add(d)
+	if until.After(e.restoreUntil) {
+		e.restoreUntil = until
+	}
+	e.emit(Target{}, RestoreWindowOpened, "restore window: a start is a restore, a kill sets no marker ("+why+")",
+		map[string]string{"until": e.restoreUntil.UTC().Format(time.RFC3339), "why": why})
+}
+
+// RestoreWindowUntil returns when the restore window ends; zero or past if none is open.
+func (e *Engine) RestoreWindowUntil() time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.restoreUntil
+}
+
+// QuarantineMarkers discards every manual-stop marker set in the 30 s before lostAt
+// (mechanism a: the events stream ended, so the kills may be a daemon shutdown).
+// Older markers, real manual stops, survive. It returns the keys it cleared.
+func (e *Engine) QuarantineMarkers(lostAt time.Time) []string {
+	return e.dropMarkers(func(st *keyState) bool { return st.tracker.Quarantine(lostAt.Add(-rules.QuarantineWindow)) },
+		"events stream lost: kills in the 30s before it may be a daemon shutdown")
+}
+
+// DropAllMarkers discards every marker (mechanism b: a new boot id, so none of
+// them can belong to this boot).
+func (e *Engine) DropAllMarkers(why string) []string {
+	return e.dropMarkers(func(st *keyState) bool { return st.tracker.Drop() }, why)
+}
+
+func (e *Engine) dropMarkers(drop func(*keyState) bool, why string) []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var cleared []string
+	for k, st := range e.keys {
+		if drop(st) {
+			st.dirty = true
+			e.flush(k, st)
+			cleared = append(cleared, k)
+		}
+	}
+	sort.Strings(cleared)
+	if len(cleared) > 0 {
+		e.emit(Target{}, MarkersQuarantined, fmt.Sprintf("%d manual-stop markers discarded: %s", len(cleared), why),
+			map[string]string{"count": strconv.Itoa(len(cleared))})
+	}
+	return cleared
 }
 
 // ObserveDockerEvent records a Docker event for a key. Events that fall inside
 // an action's in-flight window are attributed to the action and not
 // interpreted: they set no manual-stop marker, clear nothing and open nothing.
-// It reports whether the event was attributed.
+// Events inside the restore window are restores: a `start` clears no SUSPENDED
+// and a `kill` sets no marker. It reports whether the event was attributed to an action.
 func (e *Engine) ObserveDockerEvent(t Target, ev docker.Event) (attributed bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	st := e.state(t.Key)
 	at := ev.Time
 	if at.IsZero() {
@@ -163,9 +351,19 @@ func (e *Engine) ObserveDockerEvent(t Target, ev docker.Event) (attributed bool)
 		}
 	}
 
+	restoring := e.clk.Now().Before(e.restoreUntil)
+	if restoring && ev.Action == "kill" {
+		// The daemon is restoring or has just been: this is not a person.
+		e.emit(t, RestoreEvent, "kill inside the restore window: no manual-stop marker", map[string]string{"action": ev.Action})
+		return false
+	}
+
 	wasManual := st.tracker.Evidence().ManualStop
-	st.tracker.Apply(ev.Action, ev.Detail)
+	st.tracker.ApplyAt(ev.Action, ev.Detail, at)
 	isManual := st.tracker.Evidence().ManualStop
+	if wasManual != isManual {
+		st.dirty = true
+	}
 	switch {
 	case !wasManual && isManual:
 		e.emit(t, ManualStopMarked, "kill seen outside any action: container stopped by hand", map[string]string{"action": ev.Action})
@@ -173,27 +371,33 @@ func (e *Engine) ObserveDockerEvent(t Target, ev docker.Event) (attributed bool)
 		e.emit(t, ManualStopCleared, "start seen: manual-stop marker cleared", nil)
 	}
 
-	// Leaving the gave-up state: a recreate by someone else, or a start by hand
-	// after a manual stop. A plain start (the restart policy at work) does not
-	// count, or every policy restart would re-arm the ladder.
+	// Leaving SUSPENDED: a recreate by someone else, or a start by hand after a
+	// manual stop. A plain start (the restart policy at work) does not count, or
+	// every policy restart would re-arm the ladder. Neither does a start inside
+	// the restore window, nor one that follows a quarantined shutdown kill: no
+	// marker is left for it to follow.
 	switch ev.Action {
 	case "create":
 		e.reset(t, st, "container was recreated outside whalenurse")
 	case "start":
-		if wasManual {
+		switch {
+		case restoring:
+			e.emit(t, RestoreEvent, "start inside the restore window: a restore, nothing is unsuspended", map[string]string{"action": ev.Action})
+		case wasManual:
 			e.reset(t, st, "started by hand after a manual stop")
 		}
 	}
+	e.flush(t.Key, st)
 	return false
 }
 
 func (e *Engine) reset(t Target, st *keyState, why string) {
-	if st.incident != nil && st.incident.exhausted {
+	if st.incident != nil && st.incident.suspended {
 		e.emit(t, Unsuspended, why, map[string]string{"reason": why})
-		st.incident = nil
+		e.closeIncident(t, st, "unsuspended")
 	} else if st.incident != nil && why == "container was recreated outside whalenurse" {
 		e.emit(t, IncidentClosed, why, map[string]string{"reason": "recreated"})
-		st.incident = nil
+		e.closeIncident(t, st, "recreated")
 	}
 	st.advisory = ""
 }
@@ -209,14 +413,27 @@ func (e *Engine) prune(st *keyState) {
 	st.windows = kept
 }
 
+// ---- evaluation -------------------------------------------------------------------------------
+
 // Evaluate feeds the engine one classification and returns what to do. The
 // caller must have inspected the container no earlier than GRACE after the
 // trigger.
-func (e *Engine) Evaluate(t Target, d rules.Decision, cfg config.Container) Plan {
+func (e *Engine) Evaluate(t Target, d rules.Decision, cfg config.Container, o Obs) Plan {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	now := e.clk.Now()
 	st := e.state(t.Key)
-	st.name = t.Name
+	if st.name != t.Name && t.Name != "" {
+		st.name = t.Name
+		st.dirty = true
+	}
 	e.prune(st)
+	defer e.flush(t.Key, st)
+
+	// PAUSED: no actions and no state changes; events are still recorded.
+	if e.pausedLocked(t.Key, now) != nil {
+		return Plan{}
+	}
 
 	switch d.Action {
 	case rules.ActionRestart, rules.ActionStart:
@@ -231,30 +448,64 @@ func (e *Engine) Evaluate(t Target, d rules.Decision, cfg config.Container) Plan
 		e.advise(t, st, d, NotifyOnly)
 	default: // ActionNone
 		st.advisory = ""
-		return e.settle(t, st, d, cfg, now)
+		return e.settle(t, st, d, cfg, o, now)
 	}
 	return Plan{}
 }
 
 // settle handles a decision that needs no action while an incident may be open.
-func (e *Engine) settle(t Target, st *keyState, d rules.Decision, cfg config.Container, now time.Time) Plan {
+func (e *Engine) settle(t Target, st *keyState, d rules.Decision, cfg config.Container, o Obs, now time.Time) Plan {
 	inc := st.incident
 	if inc == nil || d.Class == rules.ClassSkip {
 		return Plan{}
 	}
 	switch d.Class {
 	case rules.ClassOK:
-		e.emit(t, Recovered, "container is healthy again", map[string]string{"opened": inc.opened.UTC().Format(time.RFC3339)})
-		st.incident = nil
+		return e.recovering(t, st, inc, o, now)
 	case rules.ClassStarting, rules.ClassRestarting:
 		// Not recovered yet and not failing: look again after the cooldown.
+		if inc.recovering {
+			inc.recovering = false
+			st.dirty = true
+		}
 		return Plan{RecheckAt: now.Add(config.CooldownFor(e.p.BaseCooldown, cfg.Cooldown, 0))}
 	default:
-		// Stopped on purpose, or in a state that needs no action: the incident is over.
+		// Stopped on purpose, or in a state that needs no action. A SUSPENDED
+		// container stays SUSPENDED (only the §3.2 triggers clear it); any other
+		// incident is over.
+		if inc.suspended {
+			return Plan{}
+		}
 		e.emit(t, IncidentClosed, d.Reason, map[string]string{"reason": string(d.Class)})
-		st.incident = nil
+		e.closeIncident(t, st, "stopped")
 	}
 	return Plan{}
+}
+
+// recovering handles an observation of a healthy container while an incident is
+// open. "Recovered" is plan §3.2's definition: with a healthcheck, health is
+// healthy; without one, the container is running and RestartCount has not
+// changed for RECOVERY_PERIOD. SUSPENDED clears at that point ("returns to
+// healthy"); the incident closes only after the container has stayed recovered
+// for RECOVERY_PERIOD.
+func (e *Engine) recovering(t Target, st *keyState, inc *incident, o Obs, now time.Time) Plan {
+	if !inc.recovering || o.RestartCount != inc.recoveryCount {
+		inc.recovering, inc.recoverySince, inc.recoveryCount = true, now, o.RestartCount
+		st.dirty = true
+	}
+	period := e.p.RecoveryPeriod
+	healthy := o.HasHealthcheck || now.Sub(inc.recoverySince) >= period
+	if healthy && inc.suspended {
+		inc.suspended = false
+		st.dirty = true
+		e.emit(t, Unsuspended, "container returned to healthy", map[string]string{"reason": "healthy"})
+	}
+	if now.Sub(inc.recoverySince) >= period {
+		e.emit(t, Recovered, "container has been healthy for "+period.String(), map[string]string{"opened": inc.opened.UTC().Format(time.RFC3339)})
+		e.closeIncident(t, st, "recovered")
+		return Plan{}
+	}
+	return Plan{RecheckAt: inc.recoverySince.Add(period)}
 }
 
 // advise emits an advisory event once per (class, action) until the state changes.
@@ -271,14 +522,48 @@ func (e *Engine) advise(t Target, st *keyState, d rules.Decision, typ EventType)
 	e.emit(t, typ, d.Reason, attrs)
 }
 
+func (e *Engine) flapLimit(cfg config.Container) int {
+	if cfg.FlapLimit > 0 {
+		return cfg.FlapLimit
+	}
+	return e.p.FlapLimit
+}
+
 func (e *Engine) heal(t Target, st *keyState, d rules.Decision, cfg config.Container, now time.Time) Plan {
 	st.advisory = ""
 	if st.incident == nil {
+		// Flap count: closing an incident does not reset it, only the window expiring does.
+		cut := now.Add(-e.p.FlapWindow)
+		kept := st.flaps[:0]
+		for _, f := range st.flaps {
+			if f.After(cut) {
+				kept = append(kept, f)
+			}
+		}
+		st.flaps = append(kept, now)
 		st.incident = &incident{opened: now, class: d.Class}
+		st.dirty = true
 		e.emit(t, IncidentOpened, d.Reason, map[string]string{"class": string(d.Class), "action": string(d.Action)})
+		// More than FLAP_LIMIT incidents within FLAP_WINDOW: SUSPENDED, whatever became of the last ones.
+		if limit := e.flapLimit(cfg); len(st.flaps) > limit {
+			st.incident.spent, st.incident.spentReason = true, ReasonFlapping
+			e.suspend(t, st, fmt.Sprintf("flapping: %d incidents within %s (limit %d): %s", len(st.flaps), e.p.FlapWindow, limit, d.Reason), d)
+			return Plan{}
+		}
 	}
 	inc := st.incident
-	if inc.exhausted {
+	if inc.recovering {
+		// It failed again before RECOVERY_PERIOD was over: still the same incident, so the ladder goes on where it was.
+		inc.recovering = false
+		st.dirty = true
+	}
+	if inc.suspended {
+		return Plan{}
+	}
+	if inc.spent {
+		// The ladder already ran its pass (or the key is flapping) and the suspension was lifted by a
+		// recovery that did not last. One pass per incident: SUSPENDED again, nothing is tried.
+		e.suspend(t, st, "failed again before the incident closed ("+inc.spentReason+"): "+d.Reason, d)
 		return Plan{}
 	}
 	for _, w := range st.windows {
@@ -303,31 +588,47 @@ func (e *Engine) heal(t Target, st *keyState, d rules.Decision, cfg config.Conta
 			inc.rateNoted = false
 			return Plan{Act: d.Action, Rung: r}
 		}
-		e.emit(t, RungUnavailable, fmt.Sprintf("rung %q needs M2 or later; skipped", r), map[string]string{"rung": r})
+		e.emit(t, RungUnavailable, fmt.Sprintf("rung %q: %s; skipped", r, RecreateRungNote), map[string]string{"rung": r})
 		inc.rung++
+		st.dirty = true
 	}
-	inc.exhausted = true
+	inc.spent, inc.spentReason = true, ReasonLadder
 	msg := "restart did not help"
 	if inc.rung == 0 {
 		msg = "no usable rung configured"
 	}
-	e.emit(t, GaveUp, msg+": "+d.Reason+" (recreate arrives in M2)", map[string]string{"class": string(d.Class), "held": "until recovery"})
+	e.suspend(t, st, msg+": "+d.Reason, d)
 	return Plan{}
+}
+
+func (e *Engine) suspend(t Target, st *keyState, msg string, d rules.Decision) {
+	inc := st.incident
+	inc.suspended, inc.suspendedAt = true, e.clk.Now()
+	st.dirty = true
+	e.emit(t, Suspended, msg, map[string]string{"class": string(d.Class), "reason": inc.spentReason, "held": "until it recovers, is recreated or started by hand, or you run unsuspend"})
 }
 
 // Begin opens the in-flight window for an action and returns when it started.
 func (e *Engine) Begin(t Target, plan Plan, d rules.Decision) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	now := e.clk.Now()
 	st := e.state(t.Key)
 	st.windows = append(st.windows, window{start: now})
 	e.spent = append(e.spent, now)
+	if e.p.Persist != nil && !e.p.DryRun {
+		e.p.Persist.SaveAction(now)
+	}
 	e.emit(t, ActionStarted, string(plan.Act)+": "+d.Reason, e.actionAttrs(plan, false))
 }
 
 // End closes the window, records the result and returns when to look again.
 func (e *Engine) End(t Target, plan Plan, res Result, cfg config.Container) (recheck time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	now := e.clk.Now()
 	st := e.state(t.Key)
+	defer e.flush(t.Key, st)
 	for i := range st.windows {
 		if st.windows[i].end.IsZero() {
 			st.windows[i].end = now.Add(e.p.InflightTail)
@@ -350,12 +651,15 @@ func (e *Engine) End(t Target, plan Plan, res Result, cfg config.Container) (rec
 	cd := config.CooldownFor(e.p.BaseCooldown, cfg.Cooldown, inc.rung)
 	inc.rung++
 	inc.cooldownUntil = now.Add(cd)
+	st.dirty = true
 	return inc.cooldownUntil
 }
 
 // Refuse cancels a planned action whose pre-action check failed. The rung is
 // not consumed and no rate-limit slot is spent (Begin was never called).
 func (e *Engine) Refuse(t Target, d rules.Decision, why string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.emit(t, ActionRefused, why, map[string]string{"class": string(d.Class)})
 }
 
@@ -387,4 +691,261 @@ func (e *Engine) nextSlot(now time.Time) time.Time {
 		return now.Add(time.Minute)
 	}
 	return e.spent[0].Add(time.Hour + time.Second)
+}
+
+// ---- PAUSED, unsuspend, status -----------------------------------------------------------------
+
+// DefaultPause is the pause length when the command gives none.
+const DefaultPause = 2 * time.Hour
+
+// ParseScope validates a pause scope: <project> or <project>/<service>. A
+// container that is not in a compose project is addressed by its name.
+func ParseScope(s string) (string, error) {
+	s = strings.Trim(strings.TrimSpace(s), "/")
+	parts := strings.Split(s, "/")
+	if s == "" || len(parts) > 2 {
+		return "", fmt.Errorf("scope %q: want <project> or <project>/<service>", s)
+	}
+	for _, p := range parts {
+		if p == "" {
+			return "", fmt.Errorf("scope %q: empty part", s)
+		}
+	}
+	return s, nil
+}
+
+// scopeMatches reports whether a state key (host/project/service/number, or
+// host/name) is inside the scope.
+func scopeMatches(scope, key string) bool {
+	_, rest, ok := strings.Cut(key, "/")
+	if !ok {
+		return false
+	}
+	have, want := strings.Split(rest, "/"), strings.Split(scope, "/")
+	if len(want) > len(have) {
+		return false
+	}
+	for i := range want {
+		if have[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Pause stops all actions for the scope for d (zero: until resumed). Events are
+// still recorded. It replaces an earlier pause of the same scope.
+func (e *Engine) Pause(scope string, d time.Duration) (Pause, error) {
+	scope, err := ParseScope(scope)
+	if err != nil {
+		return Pause{}, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.clk.Now()
+	p := &pause{scope: scope, created: now}
+	if d > 0 {
+		p.until = now.Add(d)
+	}
+	e.pauses[scope] = p
+	rec := Pause{Scope: scope, Until: p.until, Created: now}
+	if e.p.Persist != nil {
+		e.p.Persist.SavePause(rec)
+	}
+	attrs := map[string]string{"scope": scope}
+	msg := "paused " + scope + " indefinitely"
+	if d > 0 {
+		attrs["until"] = p.until.UTC().Format(time.RFC3339)
+		msg = fmt.Sprintf("paused %s for %s (until %s)", scope, d, p.until.UTC().Format(time.RFC3339))
+	}
+	e.emit(Target{Key: e.p.Host + "/" + scope}, Paused, msg, attrs)
+	return rec, nil
+}
+
+// Resume lifts a pause and queues the keys under it for re-evaluation. It
+// reports whether the scope was paused.
+func (e *Engine) Resume(scope string) (bool, error) {
+	scope, err := ParseScope(scope)
+	if err != nil {
+		return false, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.pauses[scope]; !ok {
+		return false, nil
+	}
+	e.endPause(scope, "resumed by command")
+	return true, nil
+}
+
+func (e *Engine) endPause(scope, why string) {
+	delete(e.pauses, scope)
+	if e.p.Persist != nil {
+		e.p.Persist.DeletePause(scope)
+	}
+	for k := range e.keys {
+		if scopeMatches(scope, k) {
+			e.reeval[k] = true
+		}
+	}
+	e.emit(Target{Key: e.p.Host + "/" + scope}, Resumed, "resumed "+scope+": "+why, map[string]string{"scope": scope, "why": why})
+}
+
+// pausedLocked returns the pause covering the key, expiring the ones that ran out.
+func (e *Engine) pausedLocked(key string, now time.Time) *pause {
+	var hit *pause
+	for _, p := range e.pauses {
+		if !p.until.IsZero() && !now.Before(p.until) {
+			continue // expired; ExpirePauses announces it
+		}
+		if scopeMatches(p.scope, key) && (hit == nil || len(p.scope) > len(hit.scope)) {
+			hit = p
+		}
+	}
+	return hit
+}
+
+// Paused reports whether actions on the key are paused, and until when (zero:
+// indefinitely).
+func (e *Engine) Paused(key string) (bool, time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if p := e.pausedLocked(key, e.clk.Now()); p != nil {
+		return true, p.until
+	}
+	return false, time.Time{}
+}
+
+// ExpirePauses ends the pauses whose time is up and queues their keys for
+// re-evaluation ("resume / expiry -> re-evaluate", plan §3.2).
+func (e *Engine) ExpirePauses() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.clk.Now()
+	for scope, p := range e.pauses {
+		if !p.until.IsZero() && !now.Before(p.until) {
+			e.endPause(scope, "pause expired")
+		}
+	}
+}
+
+// TakeReeval returns the keys to look at now (after resume, expiry or unsuspend) and forgets them.
+func (e *Engine) TakeReeval() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.reeval) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(e.reeval))
+	for k := range e.reeval {
+		out = append(out, k)
+	}
+	e.reeval = map[string]bool{}
+	sort.Strings(out)
+	return out
+}
+
+// Unsuspend lifts SUSPENDED for every key in the scope and returns the keys.
+// For a key that was suspended for flapping it also forgets the flap history:
+// without that, the next incident would suspend it again at once.
+func (e *Engine) Unsuspend(scope string) ([]string, error) {
+	scope, err := ParseScope(scope)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []string
+	for k, st := range e.keys {
+		if st.incident == nil || !st.incident.suspended || !scopeMatches(scope, k) {
+			continue
+		}
+		t := Target{Key: k, Name: st.name}
+		why := "unsuspend command"
+		if st.incident.spentReason == ReasonFlapping {
+			st.flaps = nil
+			why += " (flap history cleared)"
+		}
+		e.emit(t, Unsuspended, why, map[string]string{"reason": "command"})
+		e.closeIncident(t, st, "unsuspended")
+		st.advisory = ""
+		e.reeval[k] = true
+		e.flush(k, st)
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// KeyStatus is one row of Status.
+type KeyStatus struct {
+	Key           string    `json:"key"`
+	Name          string    `json:"name,omitempty"`
+	State         string    `json:"state"` // ok, incident, recovering, SUSPENDED, PAUSED
+	Class         string    `json:"class,omitempty"`
+	Rung          int       `json:"rung,omitempty"`
+	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
+	SuspendReason string    `json:"suspend_reason,omitempty"`
+	PausedUntil   time.Time `json:"paused_until,omitempty"`
+	Flaps         int       `json:"flaps"`
+	ManualStop    bool      `json:"manual_stop,omitempty"`
+	LoopIncreases int       `json:"loop_increases,omitempty"`
+}
+
+// Status is the engine's part of `whalenurse status`.
+type Status struct {
+	Keys         []KeyStatus `json:"keys"`
+	Pauses       []Pause     `json:"pauses"`
+	ActionsLastH int         `json:"actions_last_hour"`
+	RateLimit    int         `json:"rate_limit"`
+	RestoreUntil time.Time   `json:"restore_window_until,omitempty"`
+}
+
+// Status snapshots every key worth showing: one with an incident, a pause, flap
+// history, a marker or a crash-loop count.
+func (e *Engine) Status() Status {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.clk.Now()
+	s := Status{RateLimit: e.p.RateLimit, Keys: []KeyStatus{}, Pauses: []Pause{}}
+	if now.Before(e.restoreUntil) {
+		s.RestoreUntil = e.restoreUntil.UTC()
+	}
+	e.rateOK(now) // prunes e.spent
+	s.ActionsLastH = len(e.spent)
+	for _, p := range e.pauses {
+		s.Pauses = append(s.Pauses, Pause{Scope: p.scope, Until: p.until.UTC(), Created: p.created.UTC()})
+	}
+	sort.Slice(s.Pauses, func(i, j int) bool { return s.Pauses[i].Scope < s.Pauses[j].Scope })
+	cut := now.Add(-e.p.FlapWindow)
+	for k, st := range e.keys {
+		flaps := 0
+		for _, f := range st.flaps {
+			if f.After(cut) {
+				flaps++
+			}
+		}
+		ks := KeyStatus{Key: k, Name: st.name, State: "ok", Flaps: flaps, ManualStop: st.tracker.Evidence().ManualStop, LoopIncreases: st.loop.N}
+		if inc := st.incident; inc != nil {
+			ks.State, ks.Class, ks.Rung, ks.CooldownUntil = "incident", string(inc.class), inc.rung, inc.cooldownUntil.UTC()
+			switch {
+			case inc.suspended:
+				ks.State, ks.SuspendReason = "SUSPENDED", inc.spentReason
+			case inc.recovering:
+				ks.State = "recovering"
+			}
+		}
+		if p := e.pausedLocked(k, now); p != nil {
+			ks.PausedUntil = p.until.UTC()
+			if ks.State == "ok" || ks.State == "incident" {
+				ks.State = "PAUSED"
+			}
+		}
+		if ks.State == "ok" && flaps == 0 && !ks.ManualStop && ks.LoopIncreases == 0 {
+			continue
+		}
+		s.Keys = append(s.Keys, ks)
+	}
+	sort.Slice(s.Keys, func(i, j int) bool { return s.Keys[i].Key < s.Keys[j].Key })
+	return s
 }

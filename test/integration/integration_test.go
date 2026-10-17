@@ -17,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackspiering/whalenurse/internal/api"
 	"github.com/jackspiering/whalenurse/internal/clock"
 	"github.com/jackspiering/whalenurse/internal/config"
+	"github.com/jackspiering/whalenurse/internal/control"
 	"github.com/jackspiering/whalenurse/internal/daemon"
 	"github.com/jackspiering/whalenurse/internal/docker"
 	"github.com/jackspiering/whalenurse/internal/engine"
@@ -175,7 +177,14 @@ func breakApp(t *testing.T, g *Guard, s *stack) {
 // wrapped in the guard so it cannot touch anything outside a test project.
 func startDaemon(t *testing.T, g *Guard, cli *docker.Moby, dry bool) *engine.Recorder {
 	t.Helper()
+	rec, _ := startDaemonWith(t, g, cli, dry)
+	return rec
+}
+
+func startDaemonWith(t *testing.T, g *Guard, cli *docker.Moby, dry bool) (*engine.Recorder, *daemon.Daemon) {
+	t.Helper()
 	cfg := config.Defaults()
+	cfg.RecoveryPeriod = 10 * time.Second
 	cfg.HostID = testHost
 	cfg.Grace = 2 * time.Second
 	cfg.PollInterval = 5 * time.Second
@@ -196,7 +205,7 @@ func startDaemon(t *testing.T, g *Guard, cli *docker.Moby, dry bool) *engine.Rec
 	done := make(chan struct{})
 	go func() { defer close(done); _ = d.Run(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
-	return rec
+	return rec, d
 }
 
 func countFor(rec *engine.Recorder, typ engine.EventType, key string) int {
@@ -314,7 +323,7 @@ services:
 	if n := countFor(rec, engine.NeedsRecreate, s.key("dep")); n != 1 {
 		t.Fatalf("NeedsRecreate should be recorded once, got %d", n)
 	}
-	for _, typ := range []engine.EventType{engine.ActionStarted, engine.IncidentOpened, engine.GaveUp} {
+	for _, typ := range []engine.EventType{engine.ActionStarted, engine.IncidentOpened, engine.Suspended} {
 		if n := countFor(rec, typ, s.key("dep")); n != 0 {
 			t.Fatalf("%d %s events for the dependent", n, typ)
 		}
@@ -418,6 +427,17 @@ loop:
 		t.Fatalf("healthcheck: %v\n%s", err, out)
 	}
 
+	// The CLI works against a dry-run daemon too, and says so.
+	if out, err := runCLI(bin, env, "status"); err != nil || !strings.Contains(out, "DRY RUN") {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if out, err := runCLI(bin, env, "pause", s.project+"/app", "--for", "1m"); err != nil || !strings.Contains(out, "paused") {
+		t.Fatalf("pause: %v\n%s", err, out)
+	}
+	if out, err := runCLI(bin, env, "resume", s.project+"/app"); err != nil {
+		t.Fatalf("resume: %v\n%s", err, out)
+	}
+
 	after := s.container("app")
 	if after.ID != before.ID || !after.StartedAt.Equal(before.StartedAt) || after.Health != "unhealthy" {
 		t.Fatalf("--dry-run changed the container: %+v", after)
@@ -461,14 +481,17 @@ services:
     security_opt: ["no-new-privileges:true"]
     group_add: ["%d"]
     tmpfs: ["/run:uid=65532,gid=65532,mode=0700"]
-    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock", "data:/data"]
     environment:
       WHALENURSE_HOST_ID: %s
       WHALENURSE_GRACE: 2s
       WHALENURSE_POLL_INTERVAL: 5s
       WHALENURSE_COOLDOWN: 5s
       WHALENURSE_STARTUP_SETTLE: 0s
-`, img, gid, testHost)+appService("app"))
+`, img, gid, testHost)+appService("app")+`
+volumes:
+  data: {}
+`)
 	s.up("app")
 	waitFor(t, "app to be healthy", 60*time.Second, func() bool { return s.container("app").Health == "healthy" })
 	before := s.container("app")
@@ -485,6 +508,21 @@ services:
 		return s.container("app").StartedAt.After(before.StartedAt)
 	})
 	waitFor(t, "the image HEALTHCHECK to pass", 90*time.Second, func() bool { return s.container("whalenurse").Health == "healthy" })
+
+	// The state store lives on the /data volume, which the nonroot user can write although the rootfs is read-only,
+	// and the CLI works through docker exec (no shell in the image: the binary is the CLI).
+	wn := s.container("whalenurse").ID
+	waitFor(t, "the CLI to reach the daemon through docker exec", 30*time.Second, func() bool {
+		_, err := g.Ctr(context.Background(), "exec", wn, "/whalenurse", "status")
+		return err == nil
+	})
+	out, err := g.Ctr(context.Background(), "exec", wn, "/whalenurse", "pause", s.project+"/app", "--for", "5m")
+	if err != nil || !strings.Contains(out, "paused") {
+		t.Fatalf("pause through docker exec: %v\n%s", err, out)
+	}
+	if out, err = g.Ctr(context.Background(), "exec", wn, "/whalenurse", "status"); err != nil || !strings.Contains(out, s.project+"/app") {
+		t.Fatalf("status through docker exec: %v\n%s", err, out)
+	}
 }
 
 func inspectReadonly(t *testing.T, id string) bool {
@@ -494,4 +532,246 @@ func inspectReadonly(t *testing.T, id string) bool {
 		t.Fatal(err)
 	}
 	return strings.TrimSpace(out) == "true"
+}
+
+// stuckService is unhealthy from the start and stays so, whatever is done to it: a restart does not help.
+func stuckService(name string) string {
+	return fmt.Sprintf(`
+  %s:
+    image: busybox:1.37
+    labels:
+      whalenurse.enable: "true"
+    stop_grace_period: 2s
+    command: ["sh", "-c", "trap 'exit 0' TERM; while true; do sleep 1; done"]
+    healthcheck:
+      test: ["CMD", "false"]
+      interval: 1s
+      timeout: 1s
+      retries: 1
+`, name)
+}
+
+func stuckStack(t *testing.T, g *Guard, cli *docker.Moby, name string) *stack {
+	t.Helper()
+	s := newStack(t, g, cli, name, "services:"+stuckService("app"))
+	s.up()
+	waitFor(t, "app to be unhealthy", 30*time.Second, func() bool { return s.container("app").Health == "unhealthy" })
+	return s
+}
+
+func eventMessage(rec *engine.Recorder, typ engine.EventType, key string) string {
+	for _, e := range rec.Events() {
+		if e.Type == typ && e.Key == key {
+			return e.Message
+		}
+	}
+	return ""
+}
+
+// M2a: the ladder with only rung 1. restart, then "needs recreate (M2b)" in place of rung 2, then SUSPENDED;
+// and then nothing more is tried, however many polls pass.
+func TestLadderEndsInSuspendedWhenARestartDoesNotHelp(t *testing.T) {
+	g, cli := requireIntegration(t)
+	s := stuckStack(t, g, cli, "ladder")
+	before := s.container("app")
+
+	rec := startDaemon(t, g, cli, false)
+	waitFor(t, "the app to be SUSPENDED", 120*time.Second, func() bool { return countFor(rec, engine.Suspended, s.key("app")) == 1 })
+	if n := countFor(rec, engine.ActionStarted, s.key("app")); n != 1 {
+		t.Fatalf("want exactly one restart, got %d", n)
+	}
+	if msg := eventMessage(rec, engine.RungUnavailable, s.key("app")); !strings.Contains(msg, "needs recreate (M2b)") {
+		t.Fatalf("rung 2 should be recorded as needing M2b: %q", msg)
+	}
+	mid := s.container("app")
+	if mid.ID != before.ID || !mid.StartedAt.After(before.StartedAt) {
+		t.Fatalf("the app should have been restarted once, in place: %s %v -> %s %v", before.ID, before.StartedAt, mid.ID, mid.StartedAt)
+	}
+	time.Sleep(25 * time.Second) // five polls, several cooldowns
+	after := s.container("app")
+	if !after.StartedAt.Equal(mid.StartedAt) || countFor(rec, engine.ActionStarted, s.key("app")) != 1 {
+		t.Fatalf("SUSPENDED means no more attempts: started %v -> %v", mid.StartedAt, after.StartedAt)
+	}
+}
+
+// M2a: pause, resume and unsuspend over the control socket, against a real daemon and real containers.
+func TestPauseResumeAndUnsuspendOverTheControlSocket(t *testing.T) {
+	g, cli := requireIntegration(t)
+	s := appStack(t, g, cli, "ctl")
+	stuck := stuckStack(t, g, cli, "ctlstuck")
+	before := s.container("app")
+
+	rec, d := startDaemonWith(t, g, cli, false)
+	sock := filepath.Join(t.TempDir(), "w.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = control.Serve(ctx, sock, control.Mux(api.Handler(d), d, func(v string) (time.Duration, error) { return daemon.ParseFor(v, config.ParseDuration) }))
+	}()
+	waitFor(t, "the control socket", 10*time.Second, func() bool { return control.Health(ctx, sock) == nil })
+	cmd := func(name, scope, forDur string) (string, error) {
+		return control.Command(ctx, sock, name, control.Request{Scope: scope, For: forDur})
+	}
+
+	// PAUSED: the unhealthy app is left alone, however long we wait.
+	if _, err := cmd("pause", s.project+"/app", "1h"); err != nil {
+		t.Fatal(err)
+	}
+	breakApp(t, g, s)
+	time.Sleep(20 * time.Second)
+	if now := s.container("app"); !now.StartedAt.Equal(before.StartedAt) || now.Health != "unhealthy" {
+		t.Fatalf("a paused container was touched: %+v", now)
+	}
+	if n := countFor(rec, engine.ActionStarted, s.key("app")); n != 0 {
+		t.Fatalf("%d actions while paused", n)
+	}
+	// Resume: it is re-evaluated at once and healed.
+	if _, err := cmd("resume", s.project+"/app", ""); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the app to be restarted after resume", 60*time.Second, func() bool { return s.container("app").StartedAt.After(before.StartedAt) })
+	if _, err := cmd("resume", s.project+"/app", ""); err == nil {
+		t.Fatal("resume of something that is not paused should say so")
+	}
+
+	// SUSPENDED, then unsuspend: a fresh pass, so one more restart.
+	waitFor(t, "the stuck app to be SUSPENDED", 120*time.Second, func() bool { return countFor(rec, engine.Suspended, stuck.key("app")) == 1 })
+	if _, err := cmd("unsuspend", stuck.project, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "a second pass after unsuspend", 90*time.Second, func() bool { return countFor(rec, engine.ActionStarted, stuck.key("app")) == 2 })
+	if _, err := cmd("unsuspend", "nonexistent-project", ""); err == nil {
+		t.Fatal("unsuspend of something that is not suspended should say so")
+	}
+}
+
+// runCLI runs a whalenurse CLI command with the daemon's environment (so it finds the control socket).
+func runCLI(bin string, env []string, args ...string) (string, error) {
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+type runningBinary struct {
+	lines chan map[string]any
+	cmd   *exec.Cmd
+	done  chan error
+}
+
+func startBinary(t *testing.T, bin string, env []string, args ...string) *runningBinary {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	r := &runningBinary{lines: make(chan map[string]any, 1024), cmd: cmd, done: make(chan error, 1)}
+	go func() { r.done <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		sc.Buffer(make([]byte, 1<<20), 1<<20)
+		for sc.Scan() {
+			var m map[string]any
+			if json.Unmarshal(sc.Bytes(), &m) == nil {
+				t.Log(sc.Text())
+				r.lines <- m
+			}
+		}
+		close(r.lines)
+	}()
+	return r
+}
+
+// waitLine reads log lines until match accepts one.
+func (r *runningBinary) waitLine(t *testing.T, what string, timeout time.Duration, match func(map[string]any) bool) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case m, ok := <-r.lines:
+			if !ok {
+				t.Fatalf("whalenurse exited while waiting for %s", what)
+			}
+			if match(m) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out after %s waiting for %s", timeout, what)
+		}
+	}
+}
+
+func (r *runningBinary) stop(t *testing.T) {
+	t.Helper()
+	_ = r.cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case err := <-r.done:
+		if err != nil {
+			t.Fatalf("whalenurse did not exit cleanly on SIGTERM: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("whalenurse did not stop on SIGTERM")
+	}
+}
+
+// M2a done-criterion: state survives a whalenurse restart. SUSPENDED, the pause and the flap count are in
+// SQLite under WHALENURSE_DATA_DIR; the second run does not start the ladder over.
+func TestStateSurvivesARestartOfTheBinary(t *testing.T) {
+	g, cli := requireIntegration(t)
+	s := stuckStack(t, g, cli, "persist")
+	bin := buildBinary(t)
+	sock := filepath.Join(t.TempDir(), "w.sock")
+	env := append(os.Environ(),
+		"WHALENURSE_HOST_ID="+testHost, "WHALENURSE_GRACE=2s", "WHALENURSE_POLL_INTERVAL=5s", "WHALENURSE_COOLDOWN=5s",
+		"WHALENURSE_STARTUP_SETTLE=0s", "WHALENURSE_CONTROL_SOCKET="+sock, "WHALENURSE_DATA_DIR="+t.TempDir())
+	key := s.key("app")
+	isEvent := func(m map[string]any, typ string) bool { return m["type"] == typ && m["key"] == key }
+
+	run1 := startBinary(t, bin, env, "run")
+	run1.waitLine(t, "the app to be SUSPENDED", 120*time.Second, func(m map[string]any) bool { return isEvent(m, "Suspended") })
+	if out, err := runCLI(bin, env, "pause", s.project+"/other", "--for", "1h"); err != nil {
+		t.Fatalf("pause: %v\n%s", err, out)
+	}
+	started := s.container("app").StartedAt
+	run1.stop(t)
+
+	run2 := startBinary(t, bin, env, "run")
+	run2.waitLine(t, "the store to be loaded", 30*time.Second, func(m map[string]any) bool { return m["msg"] == "state store opened" && m["keys"].(float64) >= 1 })
+	// ask the new daemon over its socket
+	waitFor(t, "the control socket of the second run", 30*time.Second, func() bool {
+		_, err := runCLI(bin, env, "healthcheck")
+		return err == nil
+	})
+	outStr, err := runCLI(bin, env, "status", "--json")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, outStr)
+	}
+	out := []byte(outStr)
+	var st struct {
+		Engine struct {
+			Keys   []struct{ Key, State string }
+			Pauses []struct{ Scope string }
+		}
+	}
+	if err := json.Unmarshal(out, &st); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	suspended := false
+	for _, k := range st.Engine.Keys {
+		suspended = suspended || (k.Key == key && k.State == "SUSPENDED")
+	}
+	if !suspended || len(st.Engine.Pauses) != 1 || st.Engine.Pauses[0].Scope != s.project+"/other" {
+		t.Fatalf("state was lost across the restart: %s", out)
+	}
+	time.Sleep(20 * time.Second) // polls and cooldowns: the ladder must not start over
+	if now := s.container("app").StartedAt; !now.Equal(started) {
+		t.Fatalf("the second run restarted a SUSPENDED container: %v -> %v", started, now)
+	}
+	run2.stop(t)
 }

@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-The design lives in `docs/PLAN.md` (v3.3, which is v3.2 plus the approved M0b verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify), M1 (restart-only heal MVP) and M0b (the scenarios M0 could not run) are built; **M2 is next**, after the maintainer reviews M0b. The M0 results are in `docs/m0-findings.md`, the M0b results in `docs/m0b-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, and how to run the daemon in `docs/running.md`. The M0b verdicts are in the plan as v3.3 ("Changes in v3.3"); `docs/m0b-findings.md` has the evidence behind them.
+The design lives in `docs/PLAN.md` (v3.5, which is v3.4 plus the two approved M2a verdicts (the `last_seen` heartbeat, the stricter crash-loop rule); v3.4 split M2 into M2a and M2b; v3.3 holds the approved M0b verdicts; as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify), M1 (restart-only heal MVP) and M0b (the scenarios M0 could not run) are built, and **M2a is built** (plan §7: CI on Docker 29, the SQLite store, the full ladder, the CLI, shutdown handling; no compose). **M2b is next**, after the maintainer reviews M2a: `internal/compose`, recreate, the drift guard with the version gate, dependents, and the full compose CI matrix. Rung 2 does not exist until M2b: where the ladder would recreate it records "needs recreate (M2b)" and goes on to SUSPENDED. The M0 results are in `docs/m0-findings.md`, the M0b results in `docs/m0b-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, the M2a decisions and open questions in `docs/m2a-notes.md`, and how to run the daemon and the CLI in `docs/running.md`. The M0b verdicts are in the plan as v3.3 ("Changes in v3.3"); `docs/m0b-findings.md` has the evidence behind them.
 
 Layout:
 
-- Go module `github.com/jackspiering/whalenurse` (Go 1.27.2). `cmd/whalenurse` has `run [--dry-run]`, `healthcheck` and `version`. `internal/` has `docker` (moby client behind interfaces, plus a `Fake`), `rules`, `engine`, `daemon` (wires events, poll, sweep, the pre-action guard and the actor), `config`, `clock`, `api` (`/healthz`) and `control` (unix socket). The planned packages `compose`, `store`, `notify` and `web` do not exist yet.
+- Go module `github.com/jackspiering/whalenurse` (Go 1.27.2). `cmd/whalenurse` has `run [--dry-run]`, `pause`, `resume`, `unsuspend`, `status` (over the control socket), `healthcheck` and `version`. `internal/` has `docker` (moby client behind interfaces, plus a `Fake`), `rules`, `engine`, `daemon` (wires events, poll, sweep, the pre-action guard and the actor), `config`, `clock`, `api` (`/healthz`), `control` (unix socket: `/healthz` and the CLI commands) and `store` (SQLite via `modernc.org/sqlite`). The planned packages `compose`, `notify` and `web` do not exist yet.
 - `test/integration/`: tests against a real Docker daemon (build tag `integration`), with the fail-closed guard in `guard.go`.
 - `scripts/m0/`, `scripts/scrub-fixture` (inspect, events and `--journal` modes), `test/m0/`, `testdata/inspect/`, `testdata/events/`, `testdata/journal/`: the M0 tooling and scrubbed fixtures.
-- `test/m0/m0b/`: the M0b scenarios, each `prepare.sh` → maintainer step (`step.sh`) → `collect.sh`, plus `image-drift.sh` (store-aware, for CI), `teardown.sh` and `selftest.sh`. State goes to `captures/m0b/` (gitignored). `image-drift.sh` also runs in CI (`image-drift` job in `ci.yml`, both image stores).
-- `Dockerfile` (distroless/static:nonroot), `.github/workflows/ci.yml`, `examples/compose.yaml`.
+- `test/m0/m0b/`: the M0b scenarios (and `whalenurse-restart/`, the M2a check with whalenurse in a container), each `prepare.sh` → maintainer step (`step.sh`) → `collect.sh`, plus `image-drift.sh` (store-aware, for CI), `teardown.sh` and `selftest.sh`. State goes to `captures/m0b/` (gitignored). `image-drift.sh` also runs in CI (`image-drift` job in `ci.yml`, both image stores).
+- `Dockerfile` (distroless/static:nonroot; `/data` is a volume owned by 65532), `.github/workflows/ci.yml`, `scripts/ci/setup-docker.sh` (CI's Engine 29.x + compose 5.6.0 install and image-store switch; refuses to run outside GitHub Actions), `examples/compose.yaml`.
 
 Commands:
 
@@ -29,7 +29,7 @@ whalenurse is a compose-aware self-healer for Docker hosts. For opted-in contain
 
 ## Working protocol (from the plan)
 
-- Work **one milestone at a time, in order: H, M0, M1, M0b, M2 … M6**. After each, stop and report what was built, what was verified and how, what is uncertain, and which **[maintainer]** items are open. Wait for review before starting the next.
+- Work **one milestone at a time, in order: H, M0, M1, M0b, M2a, M2b, M3 … M6**. After each, stop and report what was built, what was verified and how, what is uncertain, and which **[maintainer]** items are open. Wait for review before starting the next.
 - **[maintainer]** items (GitHub settings, anything on the real Docker host) are not yours to do. List them in the report.
 - **When you change `docs/PLAN.md`, update `CLAUDE.md` to match in the same PR.**
 - **Check upstream before relying on facts.** Verify Docker/Compose behavior and dependency versions against current source, docs or releases. Use the latest stable Go and the latest release of each dependency. Record differences from the plan.
@@ -66,8 +66,15 @@ Cross-cutting design points that span several packages:
   - A failed restart-policy restart emits **no event**, so the poll detects it. The poll also re-inspects containers still `restarting` after `GRACE`.
   - `health_status` events are edge-triggered, so the safety poll (default 60s) is the level-triggered backstop.
   - A startup sweep runs after `STARTUP_SETTLE`, and again after every reconnect that follows a lost events stream. The Docker API is unavailable while the daemon restores containers (API errors then mean "not ready", not an incident), and `since=` replay holds only the new daemon's last 256 events, so replay never replaces the sweep.
-  - **Shutdown kills:** a daemon shutdown or reboot sends `kill` to every running container. Those kills must not set manual-stop markers or clear SUSPENDED. Mechanisms: (a) discard markers created in the 30 s before an events-stream loss, (b) persist `/proc/sys/kernel/random/boot_id` with the markers and drop them when it changes, (c) a restore window of `STARTUP_SETTLE` after reconnecting to a daemon that was down, in which `start` events are restores. Do **not** add a rule that recognises a burst of `kill[15]`: `docker compose stop`/`down` send the same burst, so deliberate stops would be healed.
+  - **Shutdown kills:** a daemon shutdown or reboot sends `kill` to every running container. Those kills must not set manual-stop markers or clear SUSPENDED. Mechanisms: (a) discard markers created in the 30 s before an events-stream loss, (b) persist `/proc/sys/kernel/random/boot_id` with the markers and drop them when it changes, (c) a restore window of `STARTUP_SETTLE` after reconnecting to a daemon that was down, in which `start` events are restores, (d) a persisted `last_seen` heartbeat: whalenurse is itself killed by a daemon shutdown (no stream loss, same boot id), so at startup the previous run's end counts as a stream loss (markers from the 30 s before `last_seen` are discarded; a gap over `POLL_INTERVAL` opens the restore window). Do **not** add a rule that recognises a burst of `kill[15]`: `docker compose stop`/`down` send the same burst, so deliberate stops would be healed.
 - **One domain event stream** (`IncidentOpened`, `ActionStarted`, `ActionResult`, `Suspended`, `Recovered`, `Paused`, `TagMoved`, …). Store, notify and API/SSE all subscribe to it, so notifications and history can't disagree.
+- **State and control (M2a).**
+  - The engine persists through an interface (`engine.Persister`), implemented by `internal/store`; it stays pure and is safe for concurrent use (one mutex), because the control socket calls it from HTTP goroutines. Events are published under that lock, so subscribers must not call back into the engine.
+  - **Dry-run stores nothing** (it does not open the store or need `/data`); `run` fails fast if it cannot open the store.
+  - The CLI commands (`pause`, `resume`, `unsuspend`, `status`) are served on the unix socket only. The TCP listener gets the read-only `/healthz` handler; a test in `cmd/whalenurse` asserts it has no write endpoints. Keep it that way.
+  - The poll inspects every opted-in container, because only an inspect carries `RestartCount` (the crash-loop rule, §3.3 rule 3, lives in `engine.Observe`).
+  - The crash-loop rule (§3.3 rule 3, `engine.Observe`) needs ≥3 `RestartCount` increases, the first ≥ `CRASHLOOP_AFTER` ago **and the latest < `CRASHLOOP_AFTER` ago**.
+  - `test/m0/m0b/whalenurse-restart/` is the throwaway-VM check of the shutdown handling with whalenurse itself in a container (prepare → `sudo systemctl restart docker` → collect); only the maintainer runs the step.
 - **Ladder: one pass per incident.**
   - The rungs are restart (Docker API), recreate (compose), then optional pull+recreate.
   - After each rung comes a cooldown, then a re-inspect.
@@ -97,7 +104,7 @@ Cross-cutting design points that span several packages:
 - **Dependents (`network_mode: container:<parent>` sidecars) break whenever the parent restarts or recreates.**
   - On a parent restart (same ID, parent started later), restart dependents via the API, one at a time.
   - On a parent recreate (parent ID gone), recreate the dependents with the non-forced `up -d --no-deps --pull never --no-build <dep>`. Use `--force-recreate` only if a post-check still finds a stale `NetworkMode` (M0 E1/E2).
-  - **Never API-restart a dependent whose parent ID is gone.** The restart fails and turns a running-but-disconnected dependent into an exited one. M1 logs it as "needs recreate (M2)".
+  - **Never API-restart a dependent whose parent ID is gone.** The restart fails and turns a running-but-disconnected dependent into an exited one. M1 logs it as "needs recreate (M2b)".
   - A stale dependent stays `running` with only a loopback interface, so only the staleness sweep (or the parent's `start`/`create` event) finds it. The sweep also covers the boot-time race. At boot Docker restores a dependent after its parent, also behind a slow parent start; a parent that is not restored takes its dependents down (M0b).
   - While a parent has an open incident or an in-flight action, suppress its dependents' ladders.
   - A dependent never triggers an action on its parent.

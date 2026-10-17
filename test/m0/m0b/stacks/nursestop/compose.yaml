@@ -1,0 +1,17 @@
+# M0b whalenurse-restart: three opted-in containers that `docker compose stop` will stop together, after the daemon
+# restart. Project whalenurse-m0-b-nursestop. Each one exits 1 on SIGTERM and has restart: "no", so nothing but
+# whalenurse could start it again, and whalenurse would do so (a non-zero exit it cannot explain) unless the
+# manual-stop marker holds it back. Docker's own 137 would be notify-only and prove nothing.
+name: whalenurse-m0-b-nursestop
+x-stoppable: &stoppable
+  image: whalenurse-m0/busybox:1
+  restart: "no"
+  labels:
+    whalenurse.enable: "true"
+  stop_grace_period: 10s
+  command: ["sh", "-c", "trap 'exit 1' TERM; while true; do sleep 1; done"]
+
+services:
+  s1: *stoppable
+  s2: *stoppable
+  s3: *stoppable

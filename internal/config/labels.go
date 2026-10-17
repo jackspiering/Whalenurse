@@ -39,6 +39,7 @@ type Container struct {
 	Actions    []string // ladder rungs, in order
 	HealExited HealExited
 	Cooldown   time.Duration // 0: use the global base
+	FlapLimit  int           // 0: use the global limit
 }
 
 // HasRung reports whether the ladder includes the rung.
@@ -109,10 +110,17 @@ func ParseLabels(labels map[string]string, mode Mode) (Container, []string) {
 		}
 	}
 	if v, ok := labels[LabelCooldown]; ok {
-		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d <= 0 {
+		if d, err := ParseDuration(strings.TrimSpace(v)); err != nil || d <= 0 {
 			warn("%s=%q is not a positive duration; ignored", LabelCooldown, v)
 		} else {
 			c.Cooldown = d
+		}
+	}
+	if v, ok := labels[LabelFlapLimit]; ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err != nil || n < 1 {
+			warn("%s=%q is not a positive integer; ignored", LabelFlapLimit, v)
+		} else {
+			c.FlapLimit = n
 		}
 	}
 	return c, warns

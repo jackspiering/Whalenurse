@@ -14,4 +14,9 @@ while IFS= read -r p; do
   fi
 done < <(docker ps -a --format '{{.Label "com.docker.compose.project"}}' | sort -u)
 m0b_listener_remove
+# The images prepare.sh built for the whalenurse-restart scenario (tags under whalenurse-m0/ only).
+while IFS= read -r img; do
+  echo "rmi $img"
+  m0_rmi "$img"
+done < <(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^whalenurse-m0/whalenurse:' || true)
 echo "teardown done"

@@ -62,15 +62,23 @@ jobs:
           test/m0/m0b/selftest.sh
 
   integration:
-    name: integration (real Docker, whalenurse-test-* projects only)
+    name: integration (${{ matrix.store }} store; real Docker, whalenurse-test-* projects only)
     runs-on: ubuntu-latest
     needs: [go]
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [classic, containerd]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # Engine 29.x and compose 5.6.0, as in the image-drift job. M2a does not drive compose (it only sets up
+      # test stacks), so the other two compose versions of the plan's matrix join in M2b.
+      - name: Install the latest Docker Engine 29.x and Compose 5.6.0, select the image store
+        run: scripts/ci/setup-docker.sh "${{ matrix.store }}"
       - name: Docker environment
         run: |
           docker version
@@ -97,26 +105,8 @@ jobs:
         store: [classic, containerd]
     steps:
       - uses: actions/checkout@v7
-      # The runner ships Engine 28.0.4 and compose 2.38.x. `docker image inspect --platform` needs Engine 28.1 or later
-      # and the dry-run oracle is pinned to compose v5.x (plan section 6), so install what the plan's matrix names.
-      - name: Install the latest Docker Engine 29.x and Compose 5.6.0
-        run: |
-          sudo install -m 0755 -d /etc/apt/keyrings
-          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker-m0b.asc
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker-m0b.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker-m0b.list
-          sudo apt-get update
-          sudo apt-get install -y --allow-change-held-packages --allow-downgrades docker-ce='5:29.*' docker-ce-cli='5:29.*' containerd.io docker-compose-plugin='5.6.0*'
-          docker version --format 'engine {{.Server.Version}} (API {{.Server.APIVersion}})'
-          docker compose version
-      - name: Select the image store and restart Docker
-        run: |
-          if [ "${{ matrix.store }}" = containerd ]; then
-            echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json
-          else
-            echo '{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}' | sudo tee /etc/docker/daemon.json
-          fi
-          sudo systemctl restart docker
-          docker info --format 'storage driver: {{.Driver}} / {{json .DriverStatus}}'
+      - name: Install the latest Docker Engine 29.x and Compose 5.6.0, select the image store
+        run: scripts/ci/setup-docker.sh "${{ matrix.store }}"
       - name: Image drift (M0b scenario 5; whalenurse-m0-b-imgdrift project only)
         run: test/m0/m0b/image-drift.sh --out "$RUNNER_TEMP/imgdrift-${{ matrix.store }}"
       - name: Summary

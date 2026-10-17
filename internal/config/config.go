@@ -1,7 +1,6 @@
 // Package config parses the WHALENURSE_* environment and the whalenurse.*
-// container labels. Only the M1 subset is acted on; variables that belong to
-// later milestones are accepted with a warning so a full config file does not
-// break an M1 deployment.
+// container labels. Variables that belong to later milestones are accepted
+// with a warning so a full config file does not break an earlier deployment.
 package config
 
 import (
@@ -35,7 +34,13 @@ type Global struct {
 	StartupSettle  time.Duration
 	LogLevel       slog.Level
 	HTTPAddr       string // empty: no TCP listener
-	ControlSocket  string // unix socket for /healthz (and the CLI from M2)
+	ControlSocket  string // unix socket for /healthz and the CLI (pause, resume, unsuspend, status)
+
+	RecoveryPeriod   time.Duration // an incident closes after this long recovered; a crash loop clears after it
+	FlapLimit        int           // more than this many incidents within FlapWindow suspends the container
+	FlapWindow       time.Duration
+	DataDir          string        // the SQLite store lives here
+	HistoryRetention time.Duration // closed incidents older than this are pruned
 }
 
 // CooldownMax caps the cooldown backoff.
@@ -55,21 +60,22 @@ func Defaults() Global {
 		StartupSettle:  2 * time.Minute,
 		LogLevel:       slog.LevelInfo,
 		ControlSocket:  "/run/whalenurse.sock",
+
+		RecoveryPeriod:   10 * time.Minute,
+		FlapLimit:        3,
+		FlapWindow:       24 * time.Hour,
+		DataDir:          "/data",
+		HistoryRetention: 30 * 24 * time.Hour,
 	}
 }
 
-// later lists variables defined in the plan that M1 does not act on.
+// later lists variables defined in the plan that nothing acts on yet.
 var later = map[string]string{
-	"WHALENURSE_NOTIFY_URLS":       "M3",
-	"WHALENURSE_RECOVERY_PERIOD":   "M2",
-	"WHALENURSE_FLAP_LIMIT":        "M2",
-	"WHALENURSE_FLAP_WINDOW":       "M2",
-	"WHALENURSE_DRIFT_GUARD":       "M2",
-	"WHALENURSE_COMPOSE_BIN":       "M2",
-	"WHALENURSE_DATA_DIR":          "M2",
-	"WHALENURSE_HTTP_TOKEN":        "M5",
-	"WHALENURSE_HISTORY_RETENTION": "M2",
-	"WHALENURSE_HEARTBEAT_URL":     "M3",
+	"WHALENURSE_NOTIFY_URLS":   "M3",
+	"WHALENURSE_DRIFT_GUARD":   "M2b",
+	"WHALENURSE_COMPOSE_BIN":   "M2b",
+	"WHALENURSE_HTTP_TOKEN":    "M5",
+	"WHALENURSE_HEARTBEAT_URL": "M3",
 }
 
 // FromEnv parses environ ("KEY=value" strings, as os.Environ returns). It
@@ -93,7 +99,7 @@ func FromEnv(environ []string) (Global, []string, error) {
 	}
 	dur := func(k string, dst *time.Duration, allowZero bool) {
 		if v, ok := take(k); ok {
-			d, err := time.ParseDuration(v)
+			d, err := ParseDuration(v)
 			switch {
 			case err != nil:
 				errs = append(errs, fmt.Sprintf("%s=%q: %v", k, v, err))
@@ -131,6 +137,20 @@ func FromEnv(environ []string) (Global, []string, error) {
 	dur("WHALENURSE_COOLDOWN", &g.Cooldown, true)
 	dur("WHALENURSE_CRASHLOOP_AFTER", &g.CrashloopAfter, false)
 	dur("WHALENURSE_STARTUP_SETTLE", &g.StartupSettle, true)
+	dur("WHALENURSE_RECOVERY_PERIOD", &g.RecoveryPeriod, false)
+	dur("WHALENURSE_FLAP_WINDOW", &g.FlapWindow, false)
+	dur("WHALENURSE_HISTORY_RETENTION", &g.HistoryRetention, false)
+	if v, ok := take("WHALENURSE_FLAP_LIMIT"); ok {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			errs = append(errs, fmt.Sprintf("WHALENURSE_FLAP_LIMIT=%q: want a positive integer", v))
+		} else {
+			g.FlapLimit = n
+		}
+	}
+	if v, ok := take("WHALENURSE_DATA_DIR"); ok {
+		g.DataDir = v
+	}
 	if v, ok := take("WHALENURSE_RATE_LIMIT"); ok {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
@@ -180,4 +200,23 @@ func CooldownFor(base, override time.Duration, rung int) time.Duration {
 		d *= 2
 	}
 	return min(d, CooldownMax)
+}
+
+// ParseDuration is time.ParseDuration plus a day suffix ("30d", "2d12h"), which the
+// plan's defaults use (WHALENURSE_HISTORY_RETENTION=30d).
+func ParseDuration(v string) (time.Duration, error) {
+	if d, rest, ok := strings.Cut(v, "d"); ok && d != "" && strings.Trim(d, "0123456789") == "" {
+		days, err := strconv.Atoi(d)
+		if err != nil {
+			return 0, err
+		}
+		var tail time.Duration
+		if rest != "" {
+			if tail, err = time.ParseDuration(rest); err != nil {
+				return 0, err
+			}
+		}
+		return time.Duration(days)*24*time.Hour + tail, nil
+	}
+	return time.ParseDuration(v)
 }

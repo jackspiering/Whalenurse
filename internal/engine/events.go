@@ -14,19 +14,24 @@ const (
 	IncidentClosed        EventType = "IncidentClosed" // closed without recovery: gone, stopped by hand, recreated
 	ActionStarted         EventType = "ActionStarted"
 	ActionResult          EventType = "ActionResult"
-	RungUnavailable       EventType = "RungUnavailable" // a configured rung is not implemented yet
-	GaveUp                EventType = "GaveUp"          // M1's stand-in for SUSPENDED (in memory)
-	Recovered             EventType = "Recovered"
+	RungUnavailable       EventType = "RungUnavailable" // a configured rung does not exist yet: recreate is M2b
+	Suspended             EventType = "Suspended"       // the ladder is spent, or the key is flapping; nothing more is tried
+	Recovered             EventType = "Recovered"       // recovered for RECOVERY_PERIOD: the incident closes
 	Unsuspended           EventType = "Unsuspended"
+	Paused                EventType = "Paused"
+	Resumed               EventType = "Resumed" // by the resume command, or because the pause expired
 	RateLimited           EventType = "RateLimited"
-	NeedsRecreate         EventType = "NeedsRecreate"         // dependent whose parent ID is gone; M2 recreates it
-	NeedsDependentRestart EventType = "NeedsDependentRestart" // stale dependent after a parent restart; M2
+	NeedsRecreate         EventType = "NeedsRecreate"         // dependent whose parent ID is gone; M2b recreates it
+	NeedsDependentRestart EventType = "NeedsDependentRestart" // stale dependent after a parent restart; M2b
 	WaitingForParent      EventType = "WaitingForParent"
 	NotifyOnly            EventType = "NotifyOnly"
 	ActionRefused         EventType = "ActionRefused" // the pre-action check found a vanished parent
 	EventAttributed       EventType = "EventAttributed"
 	ManualStopMarked      EventType = "ManualStopMarked"
 	ManualStopCleared     EventType = "ManualStopCleared"
+	MarkersQuarantined    EventType = "MarkersQuarantined" // a stream loss or a new boot id discarded manual-stop markers
+	RestoreWindowOpened   EventType = "RestoreWindowOpened"
+	RestoreEvent          EventType = "RestoreEvent" // a kill or start seen inside the restore window; interpreted as a restore
 )
 
 // Event is one domain event. IDs are monotonic per host and times are UTC, so

@@ -131,7 +131,7 @@ m0b_persistence_check() {
   chk "user manager lingers (runs without a login)" "$([[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] && echo ok || echo fail)"
   chk "docker.service is enabled" "$([[ "$(systemctl is-enabled docker 2>/dev/null)" == enabled ]] && echo ok || echo fail)"
   chk "journal is persistent" "$([[ -d /var/log/journal ]] && echo ok || echo fail)"
-  chk "no tmpfs path in the stack" "$(grep -q '/tmp\|/run/user' "$STATE/stack/compose.yaml" && echo fail || echo ok)"
+  chk "no bind source on a tmpfs in the stack" "$(grep -qE 'source: *(/tmp|/run|/dev/shm|/var/run)' "$STATE/stack/compose.yaml" && echo fail || echo ok)"
   chk "the scripts are committed (a fresh checkout has them)" "$([[ -z "$(git -C "$M0B_ROOT" status --porcelain -- test/m0/m0b scripts 2>/dev/null)" ]] && echo ok || echo fail)" "(git status of test/m0/m0b and scripts)"
   cat >"$STATE/RESUME.txt" <<RESUME
 Resume $sc from any fresh session (the worktree and captures/ are on the persistent disk):

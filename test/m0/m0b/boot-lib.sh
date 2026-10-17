@@ -237,7 +237,8 @@ boot_collect_events() {
   # The first disconnect after the step ends the old daemon's stream.
   dis=$(jq -r --argjson t "$t_step" 'select(._marker == "disconnect" and .t >= $t) | .t' "$out/events-listener.norm.ndjson" | head -1)
   a=$(awk -v t="$t_step" 'BEGIN{printf "%.3f", t - 1}')
-  b=${dis:-$t_daemon}
+  # Without a disconnect marker the listener was stopped with the session (a reboot): the shutdown window is the first 30s.
+  b=${dis:-$(awk -v t="$t_step" 'BEGIN{printf "%.3f", t + 30}')}
   jq -c --argjson a "$a" --argjson b "$b" 'select(has("Action") and ((.timeNano / 1000000000) >= $a and (.timeNano / 1000000000) <= ($b + 0.5)))' \
     "$out/events-listener.norm.ndjson" >"$out/events-shutdown.ndjson"
   jq -c --argjson b "$b" 'select(has("Action") and ((.timeNano / 1000000000) > $b))' "$out/events-listener.norm.ndjson" >"$out/events-boot.ndjson"
@@ -245,9 +246,9 @@ boot_collect_events() {
   docker events --since "${t_step%.*}" --until "$(date +%s)" --filter type=container \
     --filter "label=com.docker.compose.project=$project" --format '{{json .}}' >"$out/events-newdaemon.ndjson" 2>&1 || true
 
-  csay "== events seen by the listener during the shutdown (old daemon; the stream closed at +$(awk -v a="$t_step" -v b="${dis:-0}" 'BEGIN{ if (b > 0) printf "%.1f", b - a; else print "?" }')s after the step started)"
+  csay "== events seen by the listener during the shutdown (old daemon; stream closed $(awk -v a="$t_step" -v b="${dis:-0}" 'BEGIN{ if (b > 0) printf "+%.1fs after the step started", b - a; else print "never: no disconnect marker" }'))"
   if [[ -z "$dis" ]]; then
-    csay "NO disconnect marker after the step: the listener was not running through the step (it is lost on a reboot if the user manager stops first), or the step never ran."
+    csay "NO disconnect marker after the step: the listener was stopped with the user session before the Docker stream closed (expected on a reboot), or the step never ran. Window used: the first 30s."
   fi
   if [[ -s "$out/events-shutdown.ndjson" ]]; then
     m0b_events_by_service "$out/events-shutdown.ndjson" | tee -a "$sum"

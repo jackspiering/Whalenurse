@@ -87,6 +87,8 @@ boot_prepare() {
   } >"$STATE/baseline/summary.txt"
   cat "$STATE/baseline/summary.txt"
 
+  echo "== persistence check (collect.sh must work after a reboot)"
+  m0b_persistence_check "$sc" "$(m0b_listener_unit "$sc")" || m0_die "something collect.sh needs would not survive: fix it before the step"
   m0b_write_step "$desc" "$@"
   cat <<EOF
 Notes:
@@ -98,6 +100,8 @@ Notes:
 
 EOF
   m0b_print_collect "$(basename "$(dirname "$STATE")")" "--watch 180"
+  echo "From a fresh session (also in $STATE/RESUME.txt):"
+  sed 's/^/    /' "$STATE/RESUME.txt"
 }
 
 # boot_collect <scenario> [--watch SECS] [state dir]
@@ -238,7 +242,7 @@ boot_collect_events() {
     "$out/events-listener.norm.ndjson" >"$out/events-shutdown.ndjson"
   jq -c --argjson b "$b" 'select(has("Action") and ((.timeNano / 1000000000) > $b))' "$out/events-listener.norm.ndjson" >"$out/events-boot.ndjson"
   # What the new daemon itself still has in its 256-event buffer (cross-check, and the only source if the listener missed it).
-  docker events --since "${t_daemon%.*}" --until "$(date +%s)" --filter type=container \
+  docker events --since "${t_step%.*}" --until "$(date +%s)" --filter type=container \
     --filter "label=com.docker.compose.project=$project" --format '{{json .}}' >"$out/events-newdaemon.ndjson" 2>&1 || true
 
   csay "== events seen by the listener during the shutdown (old daemon; the stream closed at +$(awk -v a="$t_step" -v b="${dis:-0}" 'BEGIN{ if (b > 0) printf "%.1f", b - a; else print "?" }')s after the step started)"
@@ -259,7 +263,7 @@ boot_collect_events() {
     csay "none"
   fi
   csay ""
-  csay "== the same, from the new daemon's own buffer (docker events --since the daemon start): $(grep -c . "$out/events-newdaemon.ndjson") lines"
+  csay "== the same, from the new daemon's own buffer (docker events --since the step started): $(grep -c . "$out/events-newdaemon.ndjson") lines"
   if [[ -s "$out/events-newdaemon.ndjson" ]] && jq -e . "$out/events-newdaemon.ndjson" >/dev/null 2>&1; then
     m0b_events_by_service "$out/events-newdaemon.ndjson" | tee -a "$sum"
   fi

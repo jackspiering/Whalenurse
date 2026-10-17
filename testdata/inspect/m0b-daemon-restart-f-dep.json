@@ -1,0 +1,196 @@
+[
+  {
+    "Id": "6b3e14ca10f3608f8afd641a61d6bfead53c37d710746e86c8b69e5d708c1617",
+    "Created": "2026-10-17T14:00:37.418113029Z",
+    "Path": "sh",
+    "Args": [
+      "<scrubbed>",
+      "<scrubbed>"
+    ],
+    "State": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 137,
+      "Error": "cannot join network namespace of a non running container: container whalenurse-m0-b-boot-f-parent-1 is exited",
+      "StartedAt": "2026-10-17T14:00:38.386207623Z",
+      "FinishedAt": "2026-10-17T14:47:14.909753393Z"
+    },
+    "Image": "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+    "ResolvConfPath": "/var/lib/docker/containers/471e6f94514c784b7c3da1f0e7dbfbfc6f7a4ea58cdee370d5348405508049fe/resolv.conf",
+    "HostnamePath": "/var/lib/docker/containers/471e6f94514c784b7c3da1f0e7dbfbfc6f7a4ea58cdee370d5348405508049fe/hostname",
+    "HostsPath": "/var/lib/docker/containers/471e6f94514c784b7c3da1f0e7dbfbfc6f7a4ea58cdee370d5348405508049fe/hosts",
+    "LogPath": "/var/lib/docker/containers/6b3e14ca10f3608f8afd641a61d6bfead53c37d710746e86c8b69e5d708c1617/6b3e14ca10f3608f8afd641a61d6bfead53c37d710746e86c8b69e5d708c1617-json.log",
+    "Name": "/whalenurse-m0-b-boot-f-dep-1",
+    "RestartCount": 0,
+    "Driver": "overlayfs",
+    "Platform": "linux",
+    "MountLabel": "",
+    "ProcessLabel": "",
+    "AppArmorProfile": "docker-default",
+    "ExecIDs": null,
+    "HostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {}
+      },
+      "NetworkMode": "container:471e6f94514c784b7c3da1f0e7dbfbfc6f7a4ea58cdee370d5348405508049fe",
+      "PortBindings": {},
+      "RestartPolicy": {
+        "Name": "unless-stopped",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": null,
+      "CgroupnsMode": "private",
+      "Dns": [],
+      "DnsOptions": [],
+      "DnsSearch": [],
+      "ExtraHosts": [],
+      "GroupAdd": null,
+      "IpcMode": "private",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": false,
+      "SecurityOpt": null,
+      "UTSMode": "",
+      "UsernsMode": "",
+      "ShmSize": 67108864,
+      "Runtime": "runc",
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 0,
+      "NanoCpus": 0,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "MaskedPaths": [
+        "/proc/acpi",
+        "/proc/asound",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/sys/devices/virtual/powercap",
+        "/sys/firmware"
+      ],
+      "ReadonlyPaths": [
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys",
+        "/proc/sysrq-trigger"
+      ]
+    },
+    "Storage": {
+      "RootFS": {
+        "Snapshot": {
+          "Name": "overlayfs"
+        }
+      }
+    },
+    "Mounts": [],
+    "Config": {
+      "Hostname": "<hostname>",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Cmd": [
+        "<scrubbed>",
+        "<scrubbed>",
+        "<scrubbed>"
+      ],
+      "Image": "whalenurse-m0/busybox:1",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "com.docker.compose.config-hash": "40e432567084c298c081b59e7cdeea27ac61def2e410650db524e83442107119",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "f-parent:service_started:true",
+        "com.docker.compose.image": "sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "whalenurse-m0-b-boot",
+        "com.docker.compose.project.config_files": "/srv/stacks/whalenurse-m0-b-boot/compose.yaml",
+        "com.docker.compose.project.environment_file": "/srv/stacks/whalenurse-m0-b-boot/vars.env",
+        "com.docker.compose.project.working_dir": "/srv/stacks/whalenurse-m0-b-boot",
+        "com.docker.compose.service": "f-dep",
+        "com.docker.compose.version": "5.6.0"
+      },
+      "StopTimeout": 2
+    },
+    "NetworkSettings": {
+      "SandboxID": "",
+      "SandboxKey": "",
+      "Ports": {},
+      "Networks": {}
+    },
+    "ImageManifestDescriptor": {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4",
+      "size": 610,
+      "annotations": {
+        "com.docker.official-images.bashbrew.arch": "amd64",
+        "org.opencontainers.image.base.name": "scratch",
+        "org.opencontainers.image.created": "2026-09-08T23:04:09Z",
+        "org.opencontainers.image.revision": "066dbf90090ab2dbb905310fac2fa10ea39a7ba6",
+        "org.opencontainers.image.source": "https://github.com/docker-library/busybox.git",
+        "org.opencontainers.image.url": "https://hub.docker.com/_/busybox",
+        "org.opencontainers.image.version": "1.37.0-glibc"
+      },
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    }
+  }
+]

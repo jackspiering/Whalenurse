@@ -31,7 +31,7 @@ M0B_PROJECT_RE='^whalenurse-m0-b-[a-z0-9][a-z0-9_-]*$'
 M0B_BOOT_PROJECT=whalenurse-m0-b-boot
 M0B_UNIT_PREFIX=whalenurse-m0b-listener
 # Daemon and runtime lines worth keeping from the journal.
-M0B_JOURNAL_PATTERN='failed to start container|restartmanger wait error|failed to restart container|failed to prepare mount points|Could not find dependent container|Daemon has completed initialization|Starting up|Daemon shutdown complete|Processing signal|Container failed to exit|Loading containers|API listen|Docker daemon|containerd'
+M0B_JOURNAL_PATTERN='failed to start container|restartmanger wait error|failed to restart container|failed to prepare mount points|Could not find dependent container|Daemon has completed initialization|Processing signal|Daemon shutdown complete|Loading containers: done|dockerd.*level=(error|warning)'
 
 m0b_require_project() {
   m0_require_project "${1-}"
@@ -116,6 +116,34 @@ m0b_step_time() {
 m0b_step_done() { if [[ -s "$STATE/step-done" ]]; then head -1 "$STATE/step-done"; else printf '%s' "$EPOCHREALTIME"; fi; }
 
 m0b_secs() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f", b-a}'; } # m0b_secs <t0> <t1>
+
+# m0b_persistence_check <scenario> <unit>: everything collect.sh needs after a reboot must be on a persistent disk or
+# start by itself. Prints one line per check and fails if any fails. Also writes <state>/RESUME.txt.
+m0b_persistence_check() {
+  local sc="$1" unit="$2" bad=0 fs
+  chk() { # chk <description> <ok|fail> [detail]
+    if [[ "$2" == ok ]]; then printf 'ok    %s %s\n' "$1" "${3-}"; else printf 'FAIL  %s %s\n' "$1" "${3-}"; bad=1; fi
+  }
+  fs=$(findmnt -no FSTYPE -T "$STATE")
+  chk "state directory is on a persistent filesystem" "$([[ "$fs" != tmpfs && "$fs" != ramfs ]] && echo ok || echo fail)" "($fs: $STATE)"
+  chk "state.env, stack and baseline are present" "$([[ -s "$STATE/state.env" && -d "$STATE/stack" && -s "$STATE/baseline/table.tsv" ]] && echo ok || echo fail)"
+  chk "listener unit is enabled (starts at boot)" "$([[ "$(systemctl --user is-enabled "$unit" 2>/dev/null)" == enabled ]] && echo ok || echo fail)" "($unit)"
+  chk "user manager lingers (runs without a login)" "$([[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] && echo ok || echo fail)"
+  chk "docker.service is enabled" "$([[ "$(systemctl is-enabled docker 2>/dev/null)" == enabled ]] && echo ok || echo fail)"
+  chk "journal is persistent" "$([[ -d /var/log/journal ]] && echo ok || echo fail)"
+  chk "no tmpfs path in the stack" "$(grep -q '/tmp\|/run/user' "$STATE/stack/compose.yaml" && echo fail || echo ok)"
+  chk "the scripts are committed (a fresh checkout has them)" "$([[ -z "$(git -C "$M0B_ROOT" status --porcelain -- test/m0/m0b scripts 2>/dev/null)" ]] && echo ok || echo fail)" "(git status of test/m0/m0b and scripts)"
+  cat >"$STATE/RESUME.txt" <<RESUME
+Resume $sc from any fresh session (the worktree and captures/ are on the persistent disk):
+
+    cd $M0B_ROOT && test/m0/m0b/$sc/collect.sh --watch 180
+
+From a different checkout of branch m0b-scenarios, point it at this state:
+
+    M0B_DIR=$M0B_DIR test/m0/m0b/$sc/collect.sh --watch 180 $STATE
+RESUME
+  return "$bad"
+}
 
 # ---- host checks ----------------------------------------------------------
 

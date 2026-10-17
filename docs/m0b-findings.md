@@ -133,7 +133,7 @@ Confirmed: events are only triggers; rule 1 (`State.Error` wins) holds for every
 Corrections and additions:
 
 1. **A third failed-start shape, from boot-time restore.** Status `exited`, exit code **126/127/128 mapped from the error** (127 for the missing bind source), `RestartCount` unchanged, `StartedAt` of the previous run, `FinishedAt` of the shutdown, `State.Error` set. That is neither the failed first start (`created` + 126–128) nor the failed restart-policy restart (`exited` + the previous run's code). The exit-code table row "126 / 127 / 128 + `State.Error`, status `created`" should read "`created` or `exited`", and rule 1's two-shape list should become three. Rule 1 itself needs no change: it tests `State.Error` and never the exit code.
-2. **Port-conflict matcher.** `Bind for <addr>:<port> failed: port is already allocated` appears as `Bind for 0.0.0.0:38080` and as `Bind for :::38080` (observed on the classic-store run). The matcher must accept both, and should accept `[::]:` too. Keep it in the one fixture-backed matcher; add `testdata/inspect/m0b-classic-e8d-port-allocated.json` next to `e8d-port-allocated.json`.
+2. **Port-conflict matcher.** `Bind for <addr>:<port> failed: port is already allocated` appears as `Bind for 0.0.0.0:38080` and as `Bind for :::38080` (observed on the classic-store run). The matcher must accept both, and `[::]:` too. M1's matcher (`internal/rules/starterror.go`) already keys on `port is already allocated` and so does; M0b pins it with `testdata/inspect/m0b-classic-e8d-port-allocated.json` and string cases for the `:::` and `[::]` forms in `rules_test.go`. Whatever M2 does to the matcher must keep matching the address-independent part.
 3. **Manual-stop markers** (§3.3, last section): the sentence "Docker's boot restart (a `start` event) clears those markers" is true, but it is not enough. See the next section.
 4. **The Docker API is unavailable while the daemon restores containers** (9s after a daemon restart; about 42s after boot plus 7s of slow starts). The poll and the events reconnect must treat API errors during that time as "daemon not ready", not as an incident. `STARTUP_SETTLE` (2m default) covers the boot case here.
 5. **`--since` replay is not a substitute for the sweep.** A reconnect with `since=<last event time>` returns the new daemon's buffered events (the restore's `start` events here), but the buffer holds only 256 events, so a busy host or a chatty healthcheck loses boot-time events. Events from the old daemon's shutdown are never available after the restart. The startup sweep is the backstop, as §3.3 already says.
@@ -150,6 +150,7 @@ Evidence:
 - §3.3: a marker is set on a `kill` outside any in-flight window. §3.2: a `start` that follows a manual-stop marker clears SUSPENDED. The restore then emits `start` for every container that comes back, so **every suspended container would be unsuspended and re-armed at each daemon restart**.
 - The stream can end before any `stop` or `die`, so the usual "kill, then die" pairing cannot be used. After a reboot, whalenurse itself may be stopped in the same second, so a persisted marker may exist without any matching event in the next run.
 - The containers that really were stopped manually (`m-unless`) stay down and keep their marker; that case works as designed.
+- **M1's tracker does exactly this today.** `rules.Summarize` on the two shutdown fixtures returns `manual-stop` for all 12 containers, including the three that never got a `die` and the ones that were only killed (`kill` alone). `rules_test.go` pins that in `multiKeyEventVerdicts`, with a comment pointing here, so that M2's fix has to change the expectation on purpose.
 
 What M2 should implement (proposed; this does not change §3 until approved):
 
@@ -220,7 +221,7 @@ The unit test in §6 names only half of the problem ("markers are cleared on sta
 Scrubbed with `scripts/scrub-fixture` and checked with `--check`; no raw capture is committed.
 
 - `testdata/inspect/` (5): `m0b-daemon-restart-f-parent`, `-f-dep`, `-g-dep`, `-n-dep` (failed boot-time starts: `exited` + 127, and the stale-reference dependents), `m0b-classic-e8d-port-allocated` (`:::` form).
-- `testdata/events/` (4): `m0b-daemon-restart-shutdown`, `m0b-daemon-restart-boot`, `m0b-reboot-shutdown`, `m0b-reboot-boot`.
+- `testdata/events/` (4): `m0b-daemon-restart-shutdown`, `m0b-daemon-restart-boot`, `m0b-reboot-shutdown`, `m0b-reboot-boot`. They span a whole stack (12 and 8 containers), `exec_*` events removed. The M1 fixture tests expected one container per events fixture and an expected classification for every inspect fixture, so M0b adds expectations to `internal/rules/rules_test.go` (test code only, no app code): six inspect scenarios and a multi-container events table (`multiKeyEventVerdicts`).
 - `testdata/journal/` (3, new): `m0b-e8-restartmanger-wait-error.txt`, `m0b-reboot-failed-to-start-container.txt`, `m0b-reboot-shutdown-and-restore.txt`.
 
 ## 8. Reproducing

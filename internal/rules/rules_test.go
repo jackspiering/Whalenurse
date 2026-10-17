@@ -294,6 +294,41 @@ var scenarios = []scenario{
 		want:   d(rules.ClassExitedOOM, rules.ActionStart),
 	},
 
+	// ---- M0b: failed starts during boot-time restore ----------------------------
+	{
+		// exited + exit 127 mapped from the error, RestartCount 0: a third shape next to the
+		// failed first start (created) and the failed restart-policy restart (previous exit code).
+		name: "boot restore: bind source gone (exited, 127)", fixture: "m0b-daemon-restart-f-parent",
+		want: withCause(d(rules.ClassStartFailed, rules.ActionStart), rules.CauseMissingMount),
+	},
+	{
+		name: "boot restore: bind source gone, exit code irrelevant", fixture: "m0b-daemon-restart-f-parent",
+		mutate: func(c *docker.Container) { c.ExitCode = 0 },
+		want:   withCause(d(rules.ClassStartFailed, rules.ActionStart), rules.CauseMissingMount),
+	},
+	{
+		name: "boot restore: dependent's own bind source gone, parent running", fixture: "m0b-daemon-restart-g-dep",
+		input: func(in *rules.Input, _ map[string]docker.Container) {
+			in.Parents = []rules.Parent{parent(parentID, true, t0, false)}
+		},
+		want: withCause(d(rules.ClassStartFailed, rules.ActionStart), rules.CauseMissingMount),
+	},
+	{
+		name: "boot restore: parent failed to start, dependent waits for it", fixture: "m0b-daemon-restart-f-dep",
+		input: func(in *rules.Input, _ map[string]docker.Container) {
+			in.Parents = []rules.Parent{parent(parentID, false, time.Time{}, false)}
+		},
+		want: withCause(d(rules.ClassWaitingForParent, rules.ActionWaitForParent), rules.CauseParentStopped),
+	},
+	{
+		name: "boot restore: restart:no parent stays down, dependent waits for it", fixture: "m0b-daemon-restart-n-dep",
+		input: func(in *rules.Input, _ map[string]docker.Container) {
+			in.Parents = []rules.Parent{parent(parentID, false, time.Time{}, false)}
+		},
+		want: withCause(d(rules.ClassWaitingForParent, rules.ActionWaitForParent), rules.CauseParentStopped),
+	},
+	{name: "first start: port already allocated, ':::' form (classic store run)", fixture: "m0b-classic-e8d-port-allocated", want: withCause(d(rules.ClassStartFailed, rules.ActionStart), rules.CausePortAllocated)},
+
 	// ---- other statuses ---------------------------------------------------------
 	{
 		name: "created, never started", fixture: "e9-crash-exited",
@@ -430,6 +465,12 @@ func TestStartErrorCauses(t *testing.T) {
 		"e8d-port-allocated":          rules.CausePortAllocated,
 		"e8e-dep-parent-removed":      rules.CauseParentGone,
 		"e8e-dep-parent-stopped":      rules.CauseParentStopped,
+
+		"m0b-classic-e8d-port-allocated": rules.CausePortAllocated, // "Bind for :::38080" (the 0.0.0.0 form is e8d)
+		"m0b-daemon-restart-f-dep":       rules.CauseParentStopped,
+		"m0b-daemon-restart-f-parent":    rules.CauseMissingMount,
+		"m0b-daemon-restart-g-dep":       rules.CauseMissingMount,
+		"m0b-daemon-restart-n-dep":       rules.CauseParentStopped,
 	}
 	for _, f := range listFixtures(t, "inspect", ".json") {
 		c := loadInspect(t, f)
@@ -454,6 +495,8 @@ func TestStartErrorStrings(t *testing.T) {
 		"network abc not found": rules.CauseNetworkGone,
 		"invalid mount config for type \"bind\": bind source path does not exist: /srv/x": rules.CauseMissingMount,
 		"driver failed ... Bind for 0.0.0.0:80 failed: port is already allocated":         rules.CausePortAllocated,
+		"driver failed ... Bind for :::80 failed: port is already allocated":              rules.CausePortAllocated,
+		"driver failed ... Bind for [::]:80 failed: port is already allocated":            rules.CausePortAllocated,
 		"something nobody has seen before":                                                rules.CauseOther,
 	}
 	for in, want := range cases {
@@ -487,12 +530,60 @@ var eventVerdicts = map[string]rules.Verdict{
 	"e9-unhealthy":            rules.VerdictUnhealthy,
 }
 
+// multiKeyEventVerdicts are the events fixtures that span several containers (M0b: a whole stack through a
+// daemon restart or a reboot), with the verdict per service.
+//
+// KNOWN PROBLEM, pinned on purpose: the shutdown fixtures come out as "manual-stop" for every container,
+// because the tracker reads the kill that Docker sends at a daemon shutdown as a person stopping it.
+// docs/m0b-findings.md ("Standalone M2 item: shutdown kills") says what M2 must do instead: such kills
+// must not set manual-stop markers or clear SUSPENDED. When M2 fixes it, change these expectations.
+var multiKeyEventVerdicts = map[string]map[string]rules.Verdict{
+	"m0b-daemon-restart-shutdown": allServices(rules.VerdictManualStop, "a-dep", "a-parent", "f-dep", "f-parent", "g-dep", "g-parent", "n-dep", "n-parent", "p-dep", "p-parent", "s-dep", "s-parent"),
+	"m0b-reboot-shutdown":         allServices(rules.VerdictManualStop, "a-dep", "a-parent", "f-dep", "f-parent", "g-dep", "g-parent", "n-dep", "n-parent", "p-dep", "p-parent", "s-dep", "s-parent"),
+	// Restored containers: only the ones that started (the failed ones emit no event at all).
+	"m0b-daemon-restart-boot": allServices(rules.VerdictRunning, "a-dep", "a-parent", "g-parent", "m-always", "p-dep", "p-parent", "s-dep", "s-parent"),
+	"m0b-reboot-boot":         allServices(rules.VerdictRunning, "a-dep", "a-parent", "g-parent", "m-always", "p-dep", "p-parent", "s-dep", "s-parent"),
+}
+
+func allServices(v rules.Verdict, services ...string) map[string]rules.Verdict {
+	out := map[string]rules.Verdict{}
+	for _, s := range services {
+		out["h/whalenurse-m0-b-boot/"+s+"/1"] = v
+	}
+	return out
+}
+
+func TestMultiKeyEventFixtures(t *testing.T) {
+	for n, want := range multiKeyEventVerdicts {
+		byKey := map[string][]rules.EventLine{}
+		for _, ev := range loadEvents(t, n) {
+			k := docker.StateKey("h", ev.Name, ev.Labels)
+			byKey[k] = append(byKey[k], rules.EventLine{Action: ev.Action, Detail: ev.Detail})
+		}
+		if len(byKey) != len(want) {
+			t.Errorf("%s: %d state keys, want %d", n, len(byKey), len(want))
+		}
+		for k, v := range want {
+			seq, ok := byKey[k]
+			if !ok {
+				t.Errorf("%s: no events for %s", n, k)
+				continue
+			}
+			if got := rules.Summarize(seq); got != v {
+				t.Errorf("%s %s: verdict %q, want %q", n, k, got, v)
+			}
+		}
+	}
+}
+
 // TestEventFixtures classifies every events fixture, grouped by state key
 // (not container ID: a recreate spans two IDs).
 func TestEventFixtures(t *testing.T) {
 	names := listFixtures(t, "events", ".ndjson")
 	for _, n := range names {
-		if _, ok := eventVerdicts[n]; !ok {
+		_, single := eventVerdicts[n]
+		_, multi := multiKeyEventVerdicts[n]
+		if !single && !multi {
 			t.Errorf("testdata/events/%s.ndjson has no expected verdict", n)
 		}
 	}

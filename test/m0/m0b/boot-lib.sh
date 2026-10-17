@@ -216,8 +216,9 @@ boot_collect() {
   for svc in f-parent f-dep g-dep n-dep p-dep s-dep m-always; do
     [[ -f "$out/inspect/$svc.json" ]] && cp "$out/inspect/$svc.json" "$STATE/fixtures-raw/m0b-$sc-$svc.json"
   done
-  [[ -s "$out/events-shutdown.ndjson" ]] && cp "$out/events-shutdown.ndjson" "$STATE/fixtures-raw/m0b-$sc-shutdown.events.ndjson"
-  [[ -s "$out/events-boot.ndjson" ]] && cp "$out/events-boot.ndjson" "$STATE/fixtures-raw/m0b-$sc-boot.events.ndjson"
+  # exec_* events (healthchecks and this script's own netns probes) are noise in a fixture
+  [[ -s "$out/events-shutdown.ndjson" ]] && jq -c 'select(.Action | test("^exec_") | not)' "$out/events-shutdown.ndjson" >"$STATE/fixtures-raw/m0b-$sc-shutdown.events.ndjson"
+  [[ -s "$out/events-boot.ndjson" ]] && jq -c 'select(.Action | test("^exec_") | not)' "$out/events-boot.ndjson" >"$STATE/fixtures-raw/m0b-$sc-boot.events.ndjson"
   csay "raw fixtures in $STATE/fixtures-raw (never commit these); promote the useful ones with:"
   csay "    test/m0/promote-fixtures.sh $STATE <name>...   # names: $(cd "$STATE/fixtures-raw" && printf '%s\n' * | sed -E 's/\.events\.ndjson$/.events/; s/\.json$//' | tr '\n' ' ')"
   m0b_set collected_at "$(date -u +%FT%TZ)"

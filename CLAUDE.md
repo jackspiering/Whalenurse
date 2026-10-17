@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-The design lives in `docs/PLAN.md` (v3.1, which is v3 plus the approved M0 verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify) and M1 (restart-only heal MVP) are built; **M0b is next** (after the maintainer reviews M1), then M2. The M0 results are in `docs/m0-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, and how to run the daemon in `docs/running.md`.
+The design lives in `docs/PLAN.md` (v3.2, which is v3.1 plus the approved M1 verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify) and M1 (restart-only heal MVP) are built; **M0b is next** (after the maintainer reviews M1), then M2. The M0 results are in `docs/m0-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, and how to run the daemon in `docs/running.md`.
 
 Layout:
 
@@ -30,6 +30,7 @@ whalenurse is a compose-aware self-healer for Docker hosts. For opted-in contain
 
 - Work **one milestone at a time, in order: H, M0, M1, M0b, M2 … M6**. After each, stop and report what was built, what was verified and how, what is uncertain, and which **[maintainer]** items are open. Wait for review before starting the next.
 - **[maintainer]** items (GitHub settings, anything on the real Docker host) are not yours to do. List them in the report.
+- **When you change `docs/PLAN.md`, update `CLAUDE.md` to match in the same PR.**
 - **Check upstream before relying on facts.** Verify Docker/Compose behavior and dependency versions against current source, docs or releases. Use the latest stable Go and the latest release of each dependency. Record differences from the plan.
 - **If a finding or test contradicts a plan rule, stop and report it.** Don't quietly change the design.
 - **Docker host safety:**

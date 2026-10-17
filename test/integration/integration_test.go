@@ -428,13 +428,13 @@ loop:
 	}
 
 	// The CLI works against a dry-run daemon too, and says so.
-	if out, err := exec.Command(bin, "status").CombinedOutput(); err != nil || !strings.Contains(string(out), "DRY RUN") {
+	if out, err := runCLI(bin, env, "status"); err != nil || !strings.Contains(out, "DRY RUN") {
 		t.Fatalf("status: %v\n%s", err, out)
 	}
-	if out, err := exec.Command(bin, "pause", s.project+"/app", "--for", "1m").CombinedOutput(); err != nil || !strings.Contains(string(out), "paused") {
+	if out, err := runCLI(bin, env, "pause", s.project+"/app", "--for", "1m"); err != nil || !strings.Contains(out, "paused") {
 		t.Fatalf("pause: %v\n%s", err, out)
 	}
-	if out, err := exec.Command(bin, "resume", s.project+"/app").CombinedOutput(); err != nil {
+	if out, err := runCLI(bin, env, "resume", s.project+"/app"); err != nil {
 		t.Fatalf("resume: %v\n%s", err, out)
 	}
 
@@ -645,6 +645,14 @@ func TestPauseResumeAndUnsuspendOverTheControlSocket(t *testing.T) {
 	}
 }
 
+// runCLI runs a whalenurse CLI command with the daemon's environment (so it finds the control socket).
+func runCLI(bin string, env []string, args ...string) (string, error) {
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 type runningBinary struct {
 	lines chan map[string]any
 	cmd   *exec.Cmd
@@ -727,11 +735,7 @@ func TestStateSurvivesARestartOfTheBinary(t *testing.T) {
 
 	run1 := startBinary(t, bin, env, "run")
 	run1.waitLine(t, "the app to be SUSPENDED", 120*time.Second, func(m map[string]any) bool { return isEvent(m, "Suspended") })
-	pauseOther := func() (string, error) {
-		out, err := exec.Command(bin, "pause", s.project+"/other", "--for", "1h").CombinedOutput()
-		return string(out), err
-	}
-	if out, err := pauseOther(); err != nil {
+	if out, err := runCLI(bin, env, "pause", s.project+"/other", "--for", "1h"); err != nil {
 		t.Fatalf("pause: %v\n%s", err, out)
 	}
 	started := s.container("app").StartedAt
@@ -741,12 +745,14 @@ func TestStateSurvivesARestartOfTheBinary(t *testing.T) {
 	run2.waitLine(t, "the store to be loaded", 30*time.Second, func(m map[string]any) bool { return m["msg"] == "state store opened" && m["keys"].(float64) >= 1 })
 	// ask the new daemon over its socket
 	waitFor(t, "the control socket of the second run", 30*time.Second, func() bool {
-		return exec.Command(bin, "healthcheck").Run() == nil
+		_, err := runCLI(bin, env, "healthcheck")
+		return err == nil
 	})
-	out, err := exec.Command(bin, "status", "--json").Output()
+	outStr, err := runCLI(bin, env, "status", "--json")
 	if err != nil {
-		t.Fatalf("status: %v", err)
+		t.Fatalf("status: %v\n%s", err, outStr)
 	}
+	out := []byte(outStr)
 	var st struct {
 		Engine struct {
 			Keys   []struct{ Key, State string }

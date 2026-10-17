@@ -93,7 +93,7 @@ Cross-cutting design points that span several packages:
   - The drift guard (config drift, image drift, compose version skew) runs before recreate. Any failure skips the recreate, notifies, and sets SUSPENDED.
   - Config drift: the primary check is the dry-run oracle, `--dry-run --progress json up -d --no-deps --pull never --no-build <svc>`, where a `Recreate` text for the container means drift. `config --hash` is the fallback when that output can't be parsed.
   - Both are skipped for services that reference another service or container (`network_mode`/`ipc`/`pid`/`volumes_from`), because compose hashes those after resolving them.
-  - Image drift, on both image stores: compare the `com.docker.compose.image` label with `docker image inspect --platform linux/<arch> --format '{{.Id}}' <ref>`. **Never use `.Descriptor.digest`** (empty on the classic store, so every container would look drifted), and never plain `.Id`, `.RepoDigests` or the container's `.Image` (index digests on containerd). `image inspect --platform` needs Engine 28.1 or later; the fallback for older Engines (minimum is v25) is an open question (plan §9 question 8).
+  - Image drift, on both image stores: compare the `com.docker.compose.image` label with `docker image inspect --platform linux/<arch> --format '{{.Id}}' <ref>`. **Never use `.Descriptor.digest`** (empty on the classic store, so every container would look drifted), and never plain `.Id`, `.RepoDigests` or the container's `.Image` (index digests on containerd). `image inspect --platform` needs Engine 28.1 or later; older Engines have no fallback: rungs 2 and 3 are disabled below Engine 28.1 / Compose v5.2.0 (plan §3.6, *Minimum versions per rung*).
 - **Dependents (`network_mode: container:<parent>` sidecars) break whenever the parent restarts or recreates.**
   - On a parent restart (same ID, parent started later), restart dependents via the API, one at a time.
   - On a parent recreate (parent ID gone), recreate the dependents with the non-forced `up -d --no-deps --pull never --no-build <dep>`. Use `--force-recreate` only if a post-check still finds a stale `NetworkMode` (M0 E1/E2).
@@ -104,7 +104,7 @@ Cross-cutting design points that span several packages:
 - **Compose binary lookup order:** `WHALENURSE_COMPOSE_BIN`, then the host plugin mounted `:ro` at a fixed path, then the bundled copy. In container mode the stacks root must be mounted at the **identical path** as on the host.
 - **Dashboard and API:** read-only, off by default, built on the versioned `/api/v1` JSON API. The CLI controls the daemon over a local unix socket, and there are no network-exposed write endpoints in v1. Never render env vars or full inspect output.
 - The moby client (`github.com/moby/moby/client` + `/api`, not `github.com/docker/docker`) is pre-1.0, so keep it behind `internal/docker`.
-- Minimum supported Docker Engine is v25.
+- Minimum supported Docker Engine is v25, for rung 1 (restart) only. Rungs 2 and 3 (recreate, pull) and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0, checked at startup: below that, one warning, rungs 2 and 3 disabled, and the ladder ends with notify + SUSPENDED after rung 1. No store-guessing fallback (plan §3.6).
 
 ## Configuration surface
 

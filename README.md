@@ -29,7 +29,7 @@ whalenurse needs access to the Docker socket, which is root-equivalent on the ho
 
 ## Requirements (planned)
 
-- Docker Engine v25 or later
+- Docker Engine v25 or later (restart only); Engine 28.1 or later and Compose v5.2.0 or later for recreate, pull and the drift guard
 - The Docker Compose plugin on the host
 - Compose stacks in plain directories on the host
 

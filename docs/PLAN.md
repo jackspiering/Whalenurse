@@ -11,6 +11,7 @@ Repo: `github.com/jackspiering/whalenurse` (Go module path, GHCR image and binar
 - §3.5: the boot-time wait for `container:` parents is confirmed (dependents come up after their parent, also behind a parent whose start takes longer than 5s); a parent that is not restored takes its dependents down.
 - §3.6 check 2: image drift compares the `com.docker.compose.image` label with `docker image inspect --platform linux/<arch> --format '{{.Id}}' <ref>`, on both image stores. `.Descriptor.digest` must never be used: it is empty on the classic store.
 - §6: unit tests for the above; the CI image-drift job runs on both stores.
+- §3.6, §3.2, §5, README requirements: **minimum versions per rung.** Rung 1 works from Engine v25; rungs 2 and 3 and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0. whalenurse checks at startup, and below that it logs one warning, disables rungs 2 and 3, and the ladder ends with notify + SUSPENDED after rung 1. No store-guessing fallback (answers §9 question 8, found by the CI `image-drift` job).
 - §7: M0b is done; M2 carries the items above.
 
 **Changes in v3.2** (from the M1 review of PR #5):
@@ -113,7 +114,7 @@ more than FLAP_LIMIT incidents (default 3) within FLAP_WINDOW (default 24h)
 any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)--> re-evaluate
 ```
 
-- **Rungs:** set per container with `whalenurse.actions` (default `restart,recreate`). Rung 3 is appended only with `whalenurse.heal.pull=true`. Each rung runs once per incident.
+- **Rungs:** set per container with `whalenurse.actions` (default `restart,recreate`). Rung 3 is appended only with `whalenurse.heal.pull=true`. Each rung runs once per incident. Rungs 2 and 3 are available only with Engine ≥ 28.1 and Compose ≥ v5.2.0; otherwise they are disabled at startup and the ladder ends after rung 1 (§3.6, *Minimum versions per rung*).
 - **Recovered means:**
   - with a healthcheck: health is `healthy`;
   - without one: the container is running and `RestartCount` has not changed for `RECOVERY_PERIOD`.
@@ -230,7 +231,7 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 2. The host plugin, mounted read-only at a fixed path (e.g. `/host/docker-compose`). The host path is typically `/usr/libexec/docker/cli-plugins/docker-compose`; `docker info` shows it. The compose plugin runs standalone.
 3. The bundled copy.
 
-Log which binary and version is in use at startup, and expose it in `/api/v1/status`. In systemd mode, use the host's `docker compose`.
+Log which binary and version is in use at startup, and expose it in `/api/v1/status`. Below Compose v5.2.0 (or Engine 28.1) rungs 2 and 3 are disabled (§3.6). In systemd mode, use the host's `docker compose`.
 
 **Command:**
 ```
@@ -301,7 +302,7 @@ A recreate deploys whatever is on disk and in the local image store *now*. The g
      `<arch>` is the server's (`docker version --format '{{.Server.Arch}}'`). This is **one comparison that is correct on both image stores** (M0b, `test/m0/m0b/image-drift.sh`): it equals the label before a re-tag and differs after. On the containerd store the label is the platform manifest digest and `--platform … .Id` returns it; on the classic store the label is the image ID.
    - **Never use `.Descriptor.digest`**, with or without `--platform`: it is empty on the classic store, so the guard would report drift for every container and SUSPEND them all. Never compare the label with plain `<ref>` `.Id`, with `.RepoDigests` or with the container's `.Image` either: on containerd those are index digests and never equal the label, and on classic plain `.Id` happens to work, which is the trap.
    - If the inspect fails (the reference is no longer present locally, or has no image for that platform), that is a failure: skip the recreate and say why.
-   - **`image inspect --platform` needs Engine 28.1 or later** (API 1.49; docker/cli added the flag after v28.0.4, and the GitHub runner's Engine 28.0.4 answered `unknown flag: --platform` in the first CI run of the `image-drift` job). The plan's minimum is Engine v25, so what to do on Engines older than 28.1 is **open** (§9 question 8).
+   - **`image inspect --platform` needs Engine 28.1 or later** (API 1.49; docker/cli added the flag after v28.0.4, and the GitHub runner's Engine 28.0.4 answered `unknown flag: --platform` in the first CI run of the `image-drift` job). There is **no fallback and no store guessing** for older Engines: see *Minimum versions per rung* below.
    - The oracle already covers image drift for the services it checks. Run this explicit comparison for the services the oracle skips and whenever the hash fallback is used.
    - Fresh Engine v29 installs default to the containerd store, and a host that has run the classic store stays on it unless `containerd-snapshotter` is set explicitly. The CI `image-drift` job runs the check on both stores.
    - Allowed only for rung 3.
@@ -314,6 +315,12 @@ A recreate deploys whatever is on disk and in the local image store *now*. The g
 - If whalenurse itself moved a shared tag (via rung 3 on another service), the message says which service did it and when.
 
 **Strictness:** `WHALENURSE_DRIFT_GUARD=strict|warn` (default `strict`). `warn` recreates anyway and says so.
+
+**Minimum versions per rung** (decided 17 Oct 2026, after the first CI run of the M0b `image-drift` job):
+- **Rung 1 (restart, Docker API only) works from Engine v25**, the minimum for whalenurse as a whole.
+- **Rungs 2 and 3 (recreate, pull) and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0**, the oldest compose in the CI matrix (§6). Engine 28.1 is the first with `image inspect --platform` (§3.6 check 2); the dry-run oracle's output is pinned by the compose matrix (on the runner's compose 2.38.2 it printed `null` instead of JSON lines).
+- **whalenurse checks both at startup** (the Engine version from the API, the compose version of the binary chosen in §3.4). If either is below the minimum it logs **one warning** that names the versions, **disables rungs 2 and 3** for every container, and the ladder ends after rung 1 with notify + SUSPENDED, as if `whalenurse.actions=restart` were set. The same applies per container when its labels select rungs that are disabled. Status and the dashboard show the disabled rungs and the reason.
+- **No store-guessing fallback.** Plain `<ref>` `.Id` equals the label on the classic store but not on the containerd store, and guessing the store is how the guard would flag or miss drift silently. Below the minimum, the guard does not run at all, and neither does the recreate it protects.
 
 ### 3.7 Pull rung (opt-in, `whalenurse.heal.pull=true`)
 
@@ -411,6 +418,8 @@ Initial defaults; tune them after M0.
 
 **CLI:** `whalenurse run` (default), `pause`, `resume`, `unsuspend`, `status`.
 
+**Version minimums (fixed, not configurable):** Engine v25 for rung 1 (restart). Rungs 2 and 3 and the drift guard need Engine ≥ 28.1 and Compose ≥ v5.2.0. whalenurse checks them at startup, logs one warning if either is lower, disables rungs 2 and 3, and ends the ladder with notify + SUSPENDED after rung 1 (§3.6). `WHALENURSE_DRIFT_GUARD=warn` does not bypass this: below the minimum there is no recreate to guard.
+
 ## 5. Architecture and dependencies
 
 ```
@@ -431,7 +440,7 @@ internal/config/     env + label parsing
 
 **Dependencies** (check the latest version at implementation time):
 - **`github.com/moby/moby/client` + `/api`.** The client was at v0.6.2 on 8 Oct 2026. It is pre-1.0, so minor versions can break; keep it behind `internal/docker`. API negotiation is the default (`WithAPIVersionNegotiation` is deprecated), and `Events()` returns a single `EventsResult`.
-- **Minimum Docker Engine v25.** Engine v29 rejects API versions below 1.44.
+- **Minimum Docker Engine v25** for rung 1 (restart). Engine v29 rejects API versions below 1.44. Rungs 2 and 3 and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0 (§3.6).
 - **`modernc.org/sqlite`.**
 - **`github.com/nicholas-fedor/shoutrrr`.** Was at v0.17.0 in Aug 2026; vet it in M3.
 - No cron library in v1. If R4 needs one, `robfig/cron` is unmaintained (last release Jan 2020); use `go-co-op/gocron/v2` or a cron-expression parser plus your own timer.
@@ -457,6 +466,7 @@ internal/config/     env + label parsing
 - failed first start (`created` + 126/127/128 + `State.Error`), failed restart (`exited` + previous exit code + `State.Error`) and failed boot-time restore (`exited` + 127 + `State.Error`, `RestartCount` 0), all classified by `State.Error` alone;
 - the port-conflict matcher accepts `Bind for 0.0.0.0:80`, `Bind for :::80` and `Bind for [::]:80`;
 - an API error or a closed stream while the daemon restores is "not ready" and opens no incident, and the sweep runs after the reconnect;
+- the startup version check: Engine below 28.1 or compose below v5.2.0 logs one warning, disables rungs 2 and 3, and an unhealthy container ends at notify + SUSPENDED after rung 1; with both at the minimum nothing is disabled;
 - stale-reference classification: `No such container` → recreate; `cannot join network namespace of a non running container` → heal the parent first, then restart the dependent;
 - a container still `restarting` after GRACE is re-inspected by the poll;
 - dependents are suppressed while the parent's incident is open.
@@ -551,6 +561,7 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 - Drift guard (§3.6), including the ref-holding skip.
 - Dependents (§3.5): discovery, ordering, staleness sweep, the remedy mapping (recreate via non-forced `up` when the parent ID is gone, API restart otherwise), and the "needs recreate (M2)" cases M1 only logs. A parent left down by policy leaves its dependents down (one notification).
 - Shutdown handling (§3.3, *Manual-stop markers*): quarantine on stream loss, persisted boot id, restore window, the sweep after every reconnect, "daemon not ready" for API errors during a restore. M1's tracker still reads a shutdown as manual stops (pinned in `rules_test.go`, `multiKeyEventVerdicts`); M2 changes that expectation on purpose.
+- The startup version check and the per-rung minimums of §3.6 (one warning, rungs 2 and 3 disabled, ladder ends at notify + SUSPENDED after rung 1).
 - Rule 1's third shape and the address-independent port matcher (M1's matcher already ignores the address); the image-drift comparator of §3.6.
 - **Done when:** the M2 integration tests in §6 pass, and state survives a whalenurse restart.
 
@@ -594,7 +605,7 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 5. ~~Does compose recreate dependents on a non-forced `up`?~~ **Answered:** yes after a parent recreate, no after a parent restart (E2). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9).
 6. Final defaults for grace, cooldown, crash-loop and rate limits (after M0).
 7. Confirm SQLite at the start of M2.
-8. **Image drift on Engines older than 28.1** (no `image inspect --platform`) and on compose versions older than the matrix (on the runner's compose 2.38.2 the dry-run oracle printed `null` instead of the JSON lines). Plain `<ref>` `.Id` equals the label on the classic store but not on the containerd store, so a fallback is store-dependent. Decide before M2 implements §3.6: either raise the minimum Engine for the drift guard, or define the fallback (for example the oracle only, plus `.Id` on the classic store).
+8. ~~Image drift on Engines older than 28.1, and compose versions older than the matrix?~~ **Answered (17 Oct 2026):** rung 1 keeps Engine v25 as the minimum. Rungs 2 and 3 and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0. whalenurse checks both at startup; below that it logs one warning, disables rungs 2 and 3, and the ladder ends with notify + SUSPENDED after rung 1. No store-guessing fallback. See §3.6, *Minimum versions per rung*.
 
 ---
 
@@ -632,7 +643,7 @@ whalenurse needs access to the Docker socket, which is root-equivalent on the ho
 
 ## Requirements (planned)
 
-- Docker Engine v25 or later
+- Docker Engine v25 or later (restart only); Engine 28.1 or later and Compose v5.2.0 or later for recreate, pull and the drift guard
 - The Docker Compose plugin on the host
 - Compose stacks in plain directories on the host
 

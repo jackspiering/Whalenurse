@@ -1,0 +1,37 @@
+# Services that reference another service (network_mode, ipc, pid, volumes_from) vs plain ones.
+services:
+  parent:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+    ipc: shareable
+    volumes: ["data:/data"]
+    healthcheck: {test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/"], interval: 2s, timeout: 2s, retries: 3}
+    stop_grace_period: 1s
+  plain:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    environment:
+      A: "${A:-1}"
+    stop_grace_period: 1s
+  netdep:
+    image: whalenurse-m0/busybox:1
+    network_mode: service:parent
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    stop_grace_period: 1s
+  ipcdep:
+    image: whalenurse-m0/busybox:1
+    ipc: service:parent
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    stop_grace_period: 1s
+  piddep:
+    image: whalenurse-m0/busybox:1
+    pid: service:parent
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    stop_grace_period: 1s
+  vfdep:
+    image: whalenurse-m0/busybox:1
+    volumes_from: [parent]
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    stop_grace_period: 1s
+volumes:
+  data: {}

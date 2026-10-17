@@ -1,0 +1,14 @@
+# Failed first starts: command not found (127), not executable (126), ENOTDIR.
+services:
+  nocmd:
+    image: whalenurse-m0/busybox:1
+    restart: unless-stopped
+    command: ["/nonexistent"]
+  noexec:
+    image: whalenurse-m0/busybox:1
+    restart: unless-stopped
+    entrypoint: ["/etc/passwd"]
+  enotdir:
+    image: whalenurse-m0/busybox:1
+    restart: unless-stopped
+    command: ["/etc/passwd/x"]

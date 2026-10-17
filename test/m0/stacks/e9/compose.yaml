@@ -1,0 +1,29 @@
+# Event-sequence scenarios (E9). Services are started one at a time by the runner.
+services:
+  sleeper:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "trap 'exit 143' TERM; while true; do sleep 1; done"]
+    stop_grace_period: 3s
+  stubborn:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "trap '' TERM; while true; do sleep 1; done"]
+    stop_grace_period: 2s
+  crash:
+    image: whalenurse-m0/busybox:1
+    restart: "no"
+    command: ["sh", "-c", "sleep 2; exit 1"]
+  oom:
+    image: whalenurse-m0/busybox:1
+    restart: "no"
+    mem_limit: 16m
+    memswap_limit: 16m
+    command: ["sh", "-c", "a=xxxxxxxxxxxxxxxx; while true; do a=\"$$a$$a\"; done"]
+  loop:
+    image: whalenurse-m0/busybox:1
+    restart: always
+    command: ["sh", "-c", "sleep 1; exit 1"]
+  hc:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "touch /tmp/ok; while true; do sleep 1; done"]
+    healthcheck: {test: ["CMD", "test", "-f", "/tmp/ok"], interval: 1s, timeout: 1s, retries: 1}
+    stop_grace_period: 1s

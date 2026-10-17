@@ -1,0 +1,16 @@
+# Recreated from inside a helper container that sees this directory read-only (E6).
+services:
+  svc:
+    image: whalenurse-m0/busybox:1
+    command: ["sh", "-c", "while true; do sleep 1; done"]
+    env_file: [./svc.env]
+    environment:
+      FROM_VARS: "${FROM_VARS:-0}"
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+    stop_grace_period: 1s

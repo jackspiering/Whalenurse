@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# Scrubs raw `docker inspect` or `docker events --format '{{json .}}'` output so
+# it is safe to commit under testdata/ (plan §3.3).
+#
+#   scrub-fixture [FILE]            scrub FILE (or stdin) to stdout; mode is auto-detected
+#   scrub-fixture --check FILE      leak check: exit 1 if FILE still holds hostnames, IPs, MACs, Env or host paths
+#   scrub-fixture --self-test       run the built-in test on a synthetic sample
+#
+# Inspect mode:
+#   - removes Config.Env
+#   - replaces label values except com.docker.compose.* and whalenurse.*
+#   - replaces hostnames, IPs (except 0.0.0.0 and 127.0.0.1, which error strings need), MACs
+#     and host mount sources with placeholders
+#   Beyond §3.3 (conservative, because a raw capture can hold secrets):
+#   - rewrites the path-valued compose labels (working_dir, config_files,
+#     environment_file) to /srv/stacks/<project>[/<basename>]
+#   - replaces Config.Cmd/Entrypoint/Args, healthcheck test arguments and
+#     health-check log output with "<scrubbed>"
+#   Container IDs are kept, so NetworkMode "container:<id>" still matches the
+#   parent's Id.
+# Events mode: keeps Type, Action, Actor.ID, scope and a whitelist of attributes
+#   (name, image, exitCode, signal, ...) plus compose/whalenurse labels (all other
+#   attributes are dropped, keys included), and
+#   rebases time/timeNano to start at 0.
+set -euo pipefail
+
+# shellcheck disable=SC2016  # jq programs, not shell expansions
+JQ_COMMON='
+def lit($needle; $rep): if ($needle | length) > 1 then split($needle) | join($rep) else . end;
+def hostpath: "/host-path/" + (split("/") | last);
+def scrub_str($srcs):
+  reduce $srcs[] as $s (.; lit($s; ($s | hostpath)))
+  | lit($root; "/repo") | lit($home; "/home/user") | lit($host; "<hostname>")
+  | gsub("(?<![0-9.])(?!192\\.0\\.2\\.|0\\.0\\.0\\.0(?![0-9.])|127\\.0\\.0\\.1(?![0-9.]))(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(?![0-9.])"; "192.0.2.99")
+  | gsub("(?i)(?<![0-9a-f:])(?!02:00:00:00:00:01)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}(?![0-9a-f:])"; "02:00:00:00:00:01");
+def stackpath($p): "/srv/stacks/" + $p;
+def fix_compose_label($p; $k):
+  if $k == "com.docker.compose.project.working_dir" then stackpath($p)
+  elif ($k == "com.docker.compose.project.config_files" or $k == "com.docker.compose.project.environment_file")
+    then (split(",") | map(stackpath($p) + "/" + (split("/") | last)) | join(","))
+  else . end;
+def keep_label: test("^(com\\.docker\\.compose\\.|whalenurse\\.)");
+'
+
+# shellcheck disable=SC2016
+JQ_INSPECT='
+def fix_labels:
+  if . == null then null else
+    (.["com.docker.compose.project"] // "unknown") as $p
+    | with_entries(.key as $k | if ($k | keep_label) then .value |= fix_compose_label($p; $k) else .value = "<scrubbed>" end)
+  end;
+def srcs:
+  [ (.Mounts[]? | select(.Type == "bind") | .Source // empty),
+    (.HostConfig.Binds[]? | split(":")[0]),
+    (.HostConfig.Mounts[]? | select(.Type == "bind") | .Source // empty) ]
+  | map(select(startswith("/"))) | unique | sort_by(-length);
+map(
+  srcs as $srcs
+  | del(.Config.Env)
+  | (if .Config != null then
+       .Config.Hostname = "<hostname>"
+       | .Config.Domainname = ""
+       | .Config.Labels |= fix_labels
+       | (if .Config.Cmd then .Config.Cmd |= map("<scrubbed>") else . end)
+       | (if .Config.Entrypoint then .Config.Entrypoint |= map("<scrubbed>") else . end)
+       | (if .Config.Healthcheck.Test then .Config.Healthcheck.Test |= ([.[0]] + (.[1:] | map("<scrubbed>"))) else . end)
+     else . end)
+  | (if .Args then .Args |= map("<scrubbed>") else . end)
+  | (if .Path then .Path |= (split("/") | last) else . end)
+  | (if .State.Health.Log then .State.Health.Log |= map(.Output = "<scrubbed>") else . end)
+  | (if .Mounts then .Mounts |= map(if .Type == "bind" then .Source |= hostpath else . end) else . end)
+  | (if .HostConfig.Binds then .HostConfig.Binds |= map(split(":") | (if (.[0] | startswith("/")) then .[0] |= hostpath else . end) | join(":")) else . end)
+  | (if .HostConfig.Mounts then .HostConfig.Mounts |= map(if .Type == "bind" then .Source |= hostpath else . end) else . end)
+  | (if .HostConfig.ExtraHosts then .HostConfig.ExtraHosts |= map("<scrubbed>") else . end)
+  | (if .HostConfig.DnsSearch then .HostConfig.DnsSearch |= map("<scrubbed>") else . end)
+  | walk(if type == "string" then scrub_str($srcs) else . end)
+)
+'
+
+# shellcheck disable=SC2016
+JQ_EVENTS='
+def keep_attr: test("^(name|image|exitCode|signal|container|type|execDuration|oomKilled)$");
+(.[0].timeNano // 0) as $t0
+| map(
+    (.Actor.Attributes // {}) as $a
+    | ($a["com.docker.compose.project"] // "unknown") as $p
+    | .Actor.Attributes = ($a | with_entries(
+        .key as $k
+        | select(($k | keep_label) or ($k | keep_attr))
+        | if ($k | keep_label) then .value |= fix_compose_label($p; $k) else . end))
+    | (if .timeNano then .timeNano -= $t0 | .time = ((.timeNano / 1000000000) | floor) else . end)
+    | walk(if type == "string" then scrub_str([]) else . end)
+  )
+| .[]
+'
+
+die() { printf 'scrub-fixture: %s\n' "$*" >&2; exit 2; }
+command -v jq >/dev/null || die "jq is required"
+
+env_args() {
+  printf -- '--arg\nhost\n%s\n--arg\nhome\n%s\n--arg\nroot\n%s\n' \
+    "$(hostname)" "${HOME:-}" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+}
+
+scrub() {
+  local input args=()
+  input=$(cat)
+  mapfile -t args < <(env_args)
+  if jq -s -e '(.[0] | type == "object") and (.[0] | has("Action"))' <<<"$input" >/dev/null 2>&1; then
+    jq -s -c "${args[@]}" "${JQ_COMMON}${JQ_EVENTS}" <<<"$input"
+  else
+    jq -s "${args[@]}" "${JQ_COMMON}map(if type == \"array\" then .[] else . end) | ${JQ_INSPECT}" <<<"$input"
+  fi
+}
+
+check() {
+  local f="$1" bad=0 host home root
+  [[ -r "$f" ]] || die "cannot read $f"
+  host=$(hostname)
+  home="${HOME:-}"
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  hit() { printf 'LEAK (%s) in %s\n' "$1" "$f" >&2; bad=1; }
+  grep -qE '"Env"[[:space:]]*:' "$f" && hit 'Config.Env key'
+  grep -nP '(?<![0-9.])(?!192\.0\.2\.|0\.0\.0\.0(?![0-9.])|127\.0\.0\.1(?![0-9.]))(?:\d{1,3}\.){3}\d{1,3}(?![0-9.])' "$f" >/dev/null && hit 'IPv4 address'
+  grep -niP '(?<![0-9a-f:])(?!02:00:00:00:00:01)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}(?![0-9a-f:])' "$f" >/dev/null && hit 'MAC address'
+  [[ -n "$host" ]] && grep -qiF -- "$host" "$f" && hit 'hostname'
+  [[ ${#home} -gt 1 ]] && grep -qF -- "$home" "$f" && hit 'home directory'
+  grep -qF -- "$root" "$f" && hit 'repository path'
+  grep -qE '"/home/[^u]|"/home/u[^s]|/Users/' "$f" && hit 'other home path'
+  return "$bad"
+}
+
+self_test() {
+  local tmp out
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+  cat >"$tmp/inspect.json" <<'JSON'
+[{
+  "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "Name": "/web-1",
+  "Path": "/usr/local/bin/serve",
+  "Args": ["--token=hunter2"],
+  "State": {"Status": "created", "Running": false, "ExitCode": 128, "OOMKilled": false,
+            "Error": "invalid mount config for type \"bind\": bind source path does not exist: /home/alice/stacks/web/data (seen from 10.20.30.40; Bind for 0.0.0.0:80 failed, 127.0.0.1)",
+            "Health": {"Status": "unhealthy", "Log": [{"Output": "curl: password=hunter2"}]}},
+  "HostConfig": {"NetworkMode": "container:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+                 "RestartPolicy": {"Name": "unless-stopped"},
+                 "Binds": ["/home/alice/stacks/web/data:/data:ro"],
+                 "ExtraHosts": ["db.alice.internal:10.20.30.41"], "Dns": ["10.20.30.1"]},
+  "Mounts": [{"Type": "bind", "Source": "/home/alice/stacks/web/data", "Destination": "/data"}],
+  "Config": {"Hostname": "alice-nas", "Domainname": "alice.internal",
+             "Env": ["DB_PASSWORD=hunter2", "PATH=/usr/bin"],
+             "Cmd": ["serve", "--api-key=hunter2"], "Entrypoint": ["/entry.sh"],
+             "Healthcheck": {"Test": ["CMD", "curl", "-u", "admin:hunter2", "localhost"]},
+             "Labels": {"com.docker.compose.project": "web",
+                        "com.docker.compose.service": "app",
+                        "com.docker.compose.container-number": "1",
+                        "com.docker.compose.project.working_dir": "/home/alice/stacks/web",
+                        "com.docker.compose.project.config_files": "/home/alice/stacks/web/compose.yaml,/home/alice/stacks/web/override.yaml",
+                        "com.docker.compose.project.environment_file": "/home/alice/stacks/web/.env",
+                        "whalenurse.enable": "true",
+                        "traefik.http.routers.x.rule": "Host(`alice.example.com`)",
+                        "org.opencontainers.image.source": "https://github.com/alice/private"}},
+  "NetworkSettings": {"IPAddress": "172.18.0.5", "Gateway": "172.18.0.1", "MacAddress": "02:42:ac:12:00:05",
+                      "Networks": {"web_default": {"IPAddress": "172.18.0.5", "MacAddress": "02:42:ac:12:00:05"}}}
+}]
+JSON
+  cat >"$tmp/events.ndjson" <<'JSON'
+{"status":"die","id":"0123456789abcdef","from":"alpine","Type":"container","Action":"die","Actor":{"ID":"0123456789abcdef","Attributes":{"com.docker.compose.project":"web","com.docker.compose.service":"app","exitCode":"1","image":"alpine","name":"web-1","traefik.rule":"Host(`alice.example.com`)","com.docker.compose.project.working_dir":"/home/alice/stacks/web"}},"scope":"local","time":1760000000,"timeNano":1760000000123456789}
+{"status":"stop","id":"0123456789abcdef","from":"alpine","Type":"container","Action":"stop","Actor":{"ID":"0123456789abcdef","Attributes":{"name":"web-1"}},"scope":"local","time":1760000003,"timeNano":1760000003123456789}
+JSON
+  fail() { echo "SELF-TEST FAIL: $*" >&2; exit 1; }
+  out="$tmp/inspect.out"
+  scrub <"$tmp/inspect.json" >"$out"
+  jq -e . "$out" >/dev/null || fail "inspect output is not valid JSON"
+  for secret in hunter2 alice 10.20.30 172.18 02:42 "$(hostname)"; do
+    ! grep -qF -- "$secret" "$out" || fail "inspect output still contains '$secret'"
+  done
+  check "$out" || fail "check flags the scrubbed inspect output"
+  ! check "$tmp/inspect.json" 2>/dev/null || fail "check passed on the raw sample"
+  jq -e '.[0].Config.Env == null' "$out" >/dev/null || fail "Env not removed"
+  jq -e '.[0].Config.Labels["com.docker.compose.service"] == "app" and .[0].Config.Labels["whalenurse.enable"] == "true"' "$out" >/dev/null || fail "compose/whalenurse labels not kept"
+  jq -e '.[0].Config.Labels["traefik.http.routers.x.rule"] == "<scrubbed>" and .[0].Config.Labels["org.opencontainers.image.source"] == "<scrubbed>"' "$out" >/dev/null || fail "other labels not replaced"
+  jq -e '.[0].Config.Labels["com.docker.compose.project.config_files"] == "/srv/stacks/web/compose.yaml,/srv/stacks/web/override.yaml"' "$out" >/dev/null || fail "config_files not rewritten"
+  jq -e '.[0].HostConfig.NetworkMode | startswith("container:fedcba98")' "$out" >/dev/null || fail "container: reference not preserved"
+  jq -e '.[0].State.Error | test("bind source path does not exist: /host-path/data")' "$out" >/dev/null || fail "State.Error text not preserved (or host path not replaced)"
+  jq -e '.[0].State.Error | test("Bind for 0.0.0.0:80 failed, 127.0.0.1")' "$out" >/dev/null || fail "0.0.0.0/127.0.0.1 were replaced"
+  jq -e '.[0].State.ExitCode == 128 and .[0].HostConfig.RestartPolicy.Name == "unless-stopped"' "$out" >/dev/null || fail "rule fields changed"
+  jq -e '.[0].Mounts[0].Source == "/host-path/data" and .[0].HostConfig.Binds[0] == "/host-path/data:/data:ro"' "$out" >/dev/null || fail "mount sources not replaced"
+  scrub <"$out" >"$tmp/again.json"
+  diff -q "$tmp/again.json" "$out" >/dev/null || fail "scrubbing is not idempotent"
+
+  out="$tmp/events.out"
+  scrub <"$tmp/events.ndjson" >"$out"
+  while IFS= read -r line; do jq -e . <<<"$line" >/dev/null || fail "events line is not valid JSON"; done <"$out"
+  for secret in alice traefik 1760000000; do
+    ! grep -qF -- "$secret" "$out" || fail "events output still contains '$secret'"
+  done
+  jq -e -s '.[0].timeNano == 0 and .[1].timeNano == 3000000000 and .[0].Actor.Attributes.exitCode == "1" and .[0].Actor.Attributes["com.docker.compose.service"] == "app"' "$out" >/dev/null || fail "events fields wrong"
+  check "$out" || fail "check flags the scrubbed events output"
+  echo "scrub-fixture self-test OK"
+}
+
+case "${1:-}" in
+  --self-test) self_test ;;
+  --check) [[ $# -eq 2 ]] || die "usage: scrub-fixture --check FILE"; check "$2" ;;
+  -h | --help) sed -n '2,24p' "$0" ;;
+  "" | -) scrub ;;
+  -*) die "unknown option: $1" ;;
+  *) [[ -r "$1" ]] || die "cannot read $1"; scrub <"$1" ;;
+esac

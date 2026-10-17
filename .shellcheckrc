@@ -1,0 +1,4 @@
+# Used by `shellcheck -x scripts/... test/...` locally and in CI.
+# Resolve `# shellcheck source=` paths relative to the script that has them.
+external-sources=true
+source-path=SCRIPTDIR

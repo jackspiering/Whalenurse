@@ -15,6 +15,8 @@ source "$here/lib.sh"
 selftest() {
   local calls=() fail=0
   # Stub docker: records every call, answers the lookups the guards make.
+  # It is called by the guard functions, which shellcheck cannot follow.
+  # shellcheck disable=SC2317
   docker() {
     calls+=("$*")
     case "$1" in

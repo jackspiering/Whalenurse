@@ -4,24 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-Pre-implementation: there is no Go code yet. The design lives in `docs/PLAN.md` (v3.1, which is v3 plus the approved M0 verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping) and M0 (diagnose and verify) are done; **M1 is next**, then M0b, then M2. The M0 results are in `docs/m0-findings.md`.
+The design lives in `docs/PLAN.md` (v3.1, which is v3 plus the approved M0 verdicts, as of 17 Oct 2026). Milestones H (repo housekeeping), M0 (diagnose and verify) and M1 (restart-only heal MVP) are built; **M0b is next** (after the maintainer reviews M1), then M2. The M0 results are in `docs/m0-findings.md`, the M1 decisions and deviations in `docs/m1-notes.md`, and how to run the daemon in `docs/running.md`.
 
-What exists besides the docs:
+Layout:
 
-- `scripts/m0/`: read-only `scan.sh` and `capture.sh` for the real host, plus `selftest.sh`.
-- `scripts/scrub-fixture`: scrubs raw `docker inspect` and `docker events` output (needs `jq`).
-- `test/m0/`: the experiment runner `run.sh`, the shared guards in `lib.sh`, `exp/e1.sh` … `e9.sh`, `stacks/` and `promote-fixtures.sh`.
-- `testdata/inspect/` and `testdata/events/`: scrubbed M0 fixtures.
+- Go module `github.com/jackspiering/whalenurse` (Go 1.27.2). `cmd/whalenurse` has `run [--dry-run]`, `healthcheck` and `version`. `internal/` has `docker` (moby client behind interfaces, plus a `Fake`), `rules`, `engine`, `daemon` (wires events, poll, sweep, the pre-action guard and the actor), `config`, `clock`, `api` (`/healthz`) and `control` (unix socket). The planned packages `compose`, `store`, `notify` and `web` do not exist yet.
+- `test/integration/`: tests against a real Docker daemon (build tag `integration`), with the fail-closed guard in `guard.go`.
+- `scripts/m0/`, `scripts/scrub-fixture`, `test/m0/`, `testdata/inspect/`, `testdata/events/`: the M0 tooling and scrubbed fixtures.
+- `Dockerfile` (distroless/static:nonroot), `.github/workflows/ci.yml`, `examples/compose.yaml`.
 
-There is still no `go.mod`, build, lint or Go test tooling. Don't invent commands. Milestone M1 creates the module (`go mod init github.com/jackspiering/whalenurse`, latest stable Go) and CI.
-
-**M0 self-tests** need no Docker (they use stubs) and work in a fresh checkout:
+Commands:
 
 ```
-scripts/m0/selftest.sh && scripts/scrub-fixture --self-test && test/m0/run.sh selftest
+go vet ./... && go test -race ./...                      # unit tests; touch no Docker
+CGO_ENABLED=0 go build -trimpath -o whalenurse ./cmd/whalenurse
+shellcheck -x $(grep -rIl --exclude-dir=testdata -E '^#!.*(ba)?sh' scripts test; find scripts test -name '*.sh')
+scripts/m0/selftest.sh && scripts/scrub-fixture --self-test && test/m0/run.sh selftest   # M0 self-tests: no Docker needed
 ```
 
-`test/m0/run.sh all` runs the real experiments and needs the maintainer's confirmation of the host first (see Docker host safety below).
+The integration tests (`WHALENURSE_INTEGRATION=1 go test -tags integration ./test/integration/`) and `test/m0/run.sh all` act on a real Docker daemon. The integration tests run in CI on GitHub-hosted runners; do not run them locally unless the maintainer has confirmed the host (see Docker host safety below).
 
 whalenurse is a compose-aware self-healer for Docker hosts. For opted-in containers that go unhealthy or stop unexpectedly, it restarts them, then recreates them from the stack's own compose files, then optionally pulls and recreates. It notifies on giving up. It is a single static Go binary that runs as a container (socket mounted) or under systemd.
 

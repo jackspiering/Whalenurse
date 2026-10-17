@@ -354,6 +354,7 @@ Initial defaults; tune them after M0.
 | `WHALENURSE_HOST_ID` | hostname |
 | `WHALENURSE_DATA_DIR` | `/data` |
 | `WHALENURSE_HTTP_ADDR` | empty (dashboard off; `:8484` in examples) |
+| `WHALENURSE_CONTROL_SOCKET` | `/run/whalenurse.sock` (unix socket for `/healthz` and, from M2, the CLI; added in M1) |
 | `WHALENURSE_HTTP_TOKEN` | — |
 | `WHALENURSE_HISTORY_RETENTION` | `30d` |
 | `WHALENURSE_HEARTBEAT_URL` | — |

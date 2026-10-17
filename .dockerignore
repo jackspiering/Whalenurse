@@ -1,0 +1,11 @@
+.git
+.github
+captures
+data
+docs
+scripts
+test
+testdata
+*.md
+whalenurse
+dist

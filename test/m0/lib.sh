@@ -14,6 +14,10 @@
 # shellcheck shell=bash
 
 M0_RE='^whalenurse-m0-[a-z0-9][a-z0-9_-]*$'
+# M0b scenario stacks (test/m0/m0b) must survive a daemon restart or a reboot between prepare and
+# collect, so the "down every leftover m0 project" sweep below leaves them alone. They are only
+# torn down by test/m0/m0b/teardown.sh.
+M0B_PREFIX_RE='^whalenurse-m0-b-'
 M0_BASE_IMAGES=(busybox:1.37 alpine:3.22 gcr.io/distroless/static:latest gcr.io/distroless/static:nonroot)
 M0_PROJECTS=()
 
@@ -124,7 +128,7 @@ m0_cleanup() {
 m0_down_leftovers() {
   local p
   while IFS= read -r p; do
-    if [[ "$p" =~ $M0_RE ]]; then m0_down "$p"; fi
+    if [[ "$p" =~ $M0_RE && ! "$p" =~ $M0B_PREFIX_RE ]]; then m0_down "$p"; fi
   done < <(docker ps -a --format '{{.Label "com.docker.compose.project"}}' | sort -u)
   return 0
 }

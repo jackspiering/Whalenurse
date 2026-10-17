@@ -1,0 +1,214 @@
+[
+  {
+    "Id": "d8345c2cf7f8a420ad9574e24fbe2d3fefd28d236a4c6eb316750b5fb7e980c0",
+    "Created": "2026-10-17T14:00:37.447103808Z",
+    "Path": "sh",
+    "Args": [
+      "<scrubbed>",
+      "<scrubbed>"
+    ],
+    "State": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 127,
+      "Error": "failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: failed to fulfil mount request: open /host-path/g-src: no such file or directory",
+      "StartedAt": "2026-10-17T14:00:48.337743854Z",
+      "FinishedAt": "2026-10-17T14:47:14.907280944Z"
+    },
+    "Image": "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+    "ResolvConfPath": "/var/lib/docker/containers/5fad23cc8a486aaddb9d3b62a8daf387554ba3f399d0f892cdc40e9cd458b8fb/resolv.conf",
+    "HostnamePath": "/var/lib/docker/containers/5fad23cc8a486aaddb9d3b62a8daf387554ba3f399d0f892cdc40e9cd458b8fb/hostname",
+    "HostsPath": "/var/lib/docker/containers/5fad23cc8a486aaddb9d3b62a8daf387554ba3f399d0f892cdc40e9cd458b8fb/hosts",
+    "LogPath": "/var/lib/docker/containers/d8345c2cf7f8a420ad9574e24fbe2d3fefd28d236a4c6eb316750b5fb7e980c0/d8345c2cf7f8a420ad9574e24fbe2d3fefd28d236a4c6eb316750b5fb7e980c0-json.log",
+    "Name": "/whalenurse-m0-b-boot-g-dep-1",
+    "RestartCount": 0,
+    "Driver": "overlayfs",
+    "Platform": "linux",
+    "MountLabel": "",
+    "ProcessLabel": "",
+    "AppArmorProfile": "docker-default",
+    "ExecIDs": null,
+    "HostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {}
+      },
+      "NetworkMode": "container:5fad23cc8a486aaddb9d3b62a8daf387554ba3f399d0f892cdc40e9cd458b8fb",
+      "PortBindings": {},
+      "RestartPolicy": {
+        "Name": "unless-stopped",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": null,
+      "CgroupnsMode": "private",
+      "Dns": [],
+      "DnsOptions": [],
+      "DnsSearch": [],
+      "ExtraHosts": [],
+      "GroupAdd": null,
+      "IpcMode": "private",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": false,
+      "SecurityOpt": null,
+      "UTSMode": "",
+      "UsernsMode": "",
+      "ShmSize": 67108864,
+      "Runtime": "runc",
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 0,
+      "NanoCpus": 0,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "bind",
+          "Source": "/host-path/g-src",
+          "Target": "/mnt/src",
+          "ReadOnly": true,
+          "BindOptions": {}
+        }
+      ],
+      "MaskedPaths": [
+        "/proc/acpi",
+        "/proc/asound",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/sys/devices/virtual/powercap",
+        "/sys/firmware"
+      ],
+      "ReadonlyPaths": [
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys",
+        "/proc/sysrq-trigger"
+      ]
+    },
+    "Storage": {
+      "RootFS": {
+        "Snapshot": {
+          "Name": "overlayfs"
+        }
+      }
+    },
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/host-path/g-src",
+        "Destination": "/mnt/src",
+        "Mode": "",
+        "RW": false,
+        "Propagation": "rprivate"
+      }
+    ],
+    "Config": {
+      "Hostname": "<hostname>",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Cmd": [
+        "<scrubbed>",
+        "<scrubbed>",
+        "<scrubbed>"
+      ],
+      "Image": "whalenurse-m0/busybox:1",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "com.docker.compose.config-hash": "e3f92fa76ca58f34058190af548acc420f6c853278c37c7e25cfe757a54bda16",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "g-parent:service_started:true",
+        "com.docker.compose.image": "sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "whalenurse-m0-b-boot",
+        "com.docker.compose.project.config_files": "/srv/stacks/whalenurse-m0-b-boot/compose.yaml",
+        "com.docker.compose.project.environment_file": "/srv/stacks/whalenurse-m0-b-boot/vars.env",
+        "com.docker.compose.project.working_dir": "/srv/stacks/whalenurse-m0-b-boot",
+        "com.docker.compose.service": "g-dep",
+        "com.docker.compose.version": "5.6.0"
+      },
+      "StopTimeout": 2
+    },
+    "NetworkSettings": {
+      "SandboxID": "",
+      "SandboxKey": "",
+      "Ports": {},
+      "Networks": {}
+    },
+    "ImageManifestDescriptor": {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4",
+      "size": 610,
+      "annotations": {
+        "com.docker.official-images.bashbrew.arch": "amd64",
+        "org.opencontainers.image.base.name": "scratch",
+        "org.opencontainers.image.created": "2026-09-08T23:04:09Z",
+        "org.opencontainers.image.revision": "066dbf90090ab2dbb905310fac2fa10ea39a7ba6",
+        "org.opencontainers.image.source": "https://github.com/docker-library/busybox.git",
+        "org.opencontainers.image.url": "https://hub.docker.com/_/busybox",
+        "org.opencontainers.image.version": "1.37.0-glibc"
+      },
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    }
+  }
+]

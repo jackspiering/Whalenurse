@@ -6,7 +6,7 @@
 #   run.sh prepare             pull the base images, tag whalenurse-m0/busybox:1, snapshot host state
 #   run.sh E1 [E2 ...]         run experiments (prepare must have run)
 #   run.sh all                 prepare + E1..E9 + host-state comparison
-#   run.sh cleanup             `down -v` on any leftover whalenurse-m0-* project
+#   run.sh cleanup             `down -v` on any leftover whalenurse-m0-* project (not the M0b ones: m0b/teardown.sh)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -32,7 +32,7 @@ selftest() {
             esac ;;
           *".Id"*) printf 'abc123' ;;
         esac ;;
-      ps) printf 'whalenurse-m0-e1\nimmich\nwhalenurse-test-x\n\nwhalenurse-m0-e2\n' ;;
+      ps) printf 'whalenurse-m0-e1\nimmich\nwhalenurse-test-x\n\nwhalenurse-m0-e2\nwhalenurse-m0-b-boot\n' ;;
     esac
     return 0
   }
@@ -90,7 +90,7 @@ selftest() {
       *) echo "FAIL: leftover cleanup ran unexpected docker call: $c"; fail=1 ;;
     esac
   done
-  ((downs == 2)) || { echo "FAIL: leftover cleanup should down exactly e1 and e2, ran $downs"; fail=1; }
+  ((downs == 2)) || { echo "FAIL: leftover cleanup should down exactly e1 and e2 (and leave the M0b stacks), ran $downs"; fail=1; }
   # No guard failure may have reached a mutating docker call.
   calls=()
   expect_refused "dc down (no docker call)" dc whalenurse-m0-e1 down

@@ -1,0 +1,17 @@
+# What the moby source (daemon/daemon.go restore(), docker-v29.9.1) predicts after the daemon restarts.
+# service	status (or any)	State.Error (regex, - for none, any)	netns with the parent (same, - or any)
+a-parent	running	-	-
+a-dep	running	-	same
+s-parent	running	-	-
+s-dep	running	-	same
+p-parent	running	-	-
+p-dep	any	any	any
+f-parent	exited	.+	-
+f-dep	exited	.+	-
+g-parent	running	-	-
+g-dep	exited	.+	-
+n-parent	exited	-	-
+n-dep	exited	.+	-
+m-unless	exited	-	-
+m-always	running	-	-
+z-created	created	-	-

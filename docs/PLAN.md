@@ -1,7 +1,18 @@
-# whalenurse — implementation plan v3.2
+# whalenurse — implementation plan v3.3
 
-Status: v3.2, approved for implementation. It is v3.1 plus the two M1 verdicts ([m1-notes.md](m1-notes.md) decisions 2 and 11), which the maintainer approved on 17 Oct 2026. v3.1 was v3 plus the M0 verdicts ([m0-findings.md](m0-findings.md) §4). Supersedes v3.1. Facts and versions are as of 17 Oct 2026 (16 Oct for the prior-art survey).
+Status: v3.3, approved for implementation. It is v3.2 plus the M0b verdicts ([m0b-findings.md](m0b-findings.md) §4), which the maintainer approved on 17 Oct 2026. v3.2 was v3.1 plus the two M1 verdicts ([m1-notes.md](m1-notes.md) decisions 2 and 11), and v3.1 was v3 plus the M0 verdicts ([m0-findings.md](m0-findings.md) §4). Supersedes v3.2. Facts and versions are as of 17 Oct 2026 (16 Oct for the prior-art survey).
 Repo: `github.com/jackspiering/whalenurse` (Go module path, GHCR image and binary are all lowercase).
+
+**Changes in v3.3** (from the M0b review of PR #6; findings references are to [m0b-findings.md](m0b-findings.md) §4):
+- §3.3 *Manual-stop markers*: kills seen during a daemon shutdown or reboot must not set manual-stop markers or clear SUSPENDED. Three mechanisms are adopted: (a) quarantine on stream loss, (b) persist the boot id, (c) a restore window after reconnecting to a daemon that was down. A fourth, recognising a burst of `kill[15]`, is **rejected**: `docker compose stop` and `down` send the same burst, so deliberate stops would be healed. The reason is recorded in the section.
+- §3.3 rule 4 and §3.5: a `restart: "no"` container stopped by a host shutdown respects its policy. It and its `network_mode` dependents stay down and whalenurse notifies once; only `heal-exited=always` starts them.
+- §3.3 rule 1: the third failed-start shape, a failed boot-time restore (`exited`, exit 126/127/128 mapped from the error, `RestartCount` unchanged). The port-conflict matcher accepts `0.0.0.0:` and `:::` (and `[::]:`). `failed to start container` is confirmed at runtime for boot restore, and the journal lines of E8 are confirmed.
+- §3.3: the Docker API is unavailable while the daemon restores containers, and `since=` replay holds only the new daemon's last 256 events and never the old daemon's shutdown, so the startup sweep is mandatory after every reconnect that follows a lost stream, not only at process start.
+- §3.5: the boot-time wait for `container:` parents is confirmed (dependents come up after their parent, also behind a parent whose start takes longer than 5s); a parent that is not restored takes its dependents down.
+- §3.6 check 2: image drift compares the `com.docker.compose.image` label with `docker image inspect --platform linux/<arch> --format '{{.Id}}' <ref>`, on both image stores. `.Descriptor.digest` must never be used: it is empty on the classic store.
+- §6: unit tests for the above; the CI image-drift job runs on both stores.
+- §3.6, §3.2, §5, README requirements: **minimum versions per rung.** Rung 1 works from Engine v25; rungs 2 and 3 and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0. whalenurse checks at startup, and below that it logs one warning, disables rungs 2 and 3, and the ladder ends with notify + SUSPENDED after rung 1. No store-guessing fallback (answers §9 question 8, found by the CI `image-drift` job).
+- §7: M0b is done; M2 carries the items above.
 
 **Changes in v3.2** (from the M1 review of PR #5):
 - §3.2: SUSPENDED clears on recovery, on an external `create`, or on a `start` that follows a manual-stop marker. A restart-policy `start` never clears it, because it would re-arm the ladder on every cycle of a loop.
@@ -103,7 +114,7 @@ more than FLAP_LIMIT incidents (default 3) within FLAP_WINDOW (default 24h)
 any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)--> re-evaluate
 ```
 
-- **Rungs:** set per container with `whalenurse.actions` (default `restart,recreate`). Rung 3 is appended only with `whalenurse.heal.pull=true`. Each rung runs once per incident.
+- **Rungs:** set per container with `whalenurse.actions` (default `restart,recreate`). Rung 3 is appended only with `whalenurse.heal.pull=true`. Each rung runs once per incident. Rungs 2 and 3 are available only with Engine ≥ 28.1 and Compose ≥ v5.2.0; otherwise they are disabled at startup and the ladder ends after rung 1 (§3.6, *Minimum versions per rung*).
 - **Recovered means:**
   - with a healthcheck: health is `healthy`;
   - without one: the container is running and `RestartCount` has not changed for `RECOVERY_PERIOD`.
@@ -119,7 +130,7 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 - **SUSPENDED clears** when:
   - the container returns to healthy;
   - an external `create` arrives outside any in-flight window;
-  - a `start` arrives outside any in-flight window **and follows a manual-stop marker** (someone stopped it, someone started it). A `start` by the restart policy never clears SUSPENDED: it is also a `start` event, and clearing on it would re-arm the ladder on every cycle of a crash loop;
+  - a `start` arrives outside any in-flight window **and follows a manual-stop marker** (someone stopped it, someone started it). A `start` by the restart policy never clears SUSPENDED: it is also a `start` event, and clearing on it would re-arm the ladder on every cycle of a crash loop. Neither does a `start` inside a restore window, nor one that follows a quarantined shutdown kill (§3.3, *Manual-stop markers*): the restore of a daemon restart or reboot would otherwise unsuspend every container;
   - someone runs `whalenurse unsuspend`.
 - **Pause:**
   - Syntax: `whalenurse pause <project>[/<service>] [--for 2h]` and `whalenurse resume ...`, run via `docker exec`. The CLI talks to the daemon over a unix socket.
@@ -131,6 +142,10 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 **Events are only triggers.** The decision is made by inspecting the container after `GRACE`, because event order is unreliable. For example, `docker stop` emits `kill` → `stop` → `die` on Engine 29.9.0. The order differs between operations and Engine versions.
 
 **Health events are edge-triggered.** Docker emits `health_status` only when the status changes (verified in `daemon/health.go`), so a missed event never repeats. The poll (default 60s) is the level-triggered backstop and applies the same rules.
+
+**The daemon restarts containers after a restart or a reboot, and that has consequences for the observer** (M0b):
+- **The Docker API is unavailable while the daemon restores containers** (9s after a daemon restart; about 48s after a reboot, of which 7s was one slow start). An API error or a closed events stream during that time means "daemon not ready": reconnect with backoff and open no incident.
+- **`since=` replay is not a substitute for the sweep.** After a reconnect, `since=<last event time>` returns only the new daemon's buffered events (the restore's `start` events), the buffer holds 256 events, and the old daemon's shutdown events are never available. A `stop` or `die` may never be emitted at all: three of twelve containers were force-killed at the end of a 15s shutdown and had neither. So **the startup sweep is mandatory after every reconnect that follows a lost stream**, not only at process start.
 
 **Fields to inspect:** `State.Status`, `State.Running`, `State.Health`, `State.ExitCode`, `State.OOMKilled`, `State.Error`, `RestartCount`, `HostConfig.RestartPolicy`, `HostConfig.NetworkMode`, and labels.
 
@@ -145,20 +160,21 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 1. **Non-empty `State.Error` means a failed start.** This rule overrides everything below. Test `State.Error != ""` on both `created` and `exited` containers, and never use the exit code to decide.
    - This is hypothesis A, confirmed in moby source and reproduced on Engine 29.9.0 (E8):
      - A start that fails during a restart-policy restart is **not retried** (`daemon/monitor.go`). Docker logs `failed to restart container` at debug level and `restartmanger wait error` at error level (the misspelling is in the source).
-     - A start that fails during boot-time restore is not retried either; Docker logs `failed to start container` (`daemon.go`). Source-checked only; M0b runs it.
-   - There are two shapes:
+     - A start that fails during boot-time restore is not retried either; Docker logs `failed to start container` at error level, once per container (`daemon.go`). Confirmed in M0b after a daemon restart and a reboot (4 containers each, no retry over 183s). The E8 line `restartmanger wait error` is confirmed in the journal; `failed to restart container` is `debug` level and is not expected there.
+   - There are three shapes:
      - **Failed first start** (`docker start`, `compose up`): status `created`, `RestartCount` 0, and an exit code of **126** (EACCES), **127** (command not found / ENOTDIR) or **128** (anything else), with `State.Error` set (E8c, E8d). There is no `die` event; the container never ran.
      - **Failed restart by the restart policy:** status `exited`, `State.Error` set, `RestartCount` incremented, and the exit code is the **previous run's** (for example 1), not 126–128 (E8).
+     - **Failed boot-time restore** (daemon restart or reboot): status `exited`, `State.Error` set, exit code **126/127/128 mapped from the error** (127 for a bind source that is gone), `RestartCount` **unchanged** (0), `StartedAt` of the previous run and `FinishedAt` of the shutdown. It emits no `die`. The dependents of a parent that fails this way fail with `cannot join network namespace of a non running container` (M0b).
    - **A failed restart emits no event** (no `die`, no `start`). The only event is the `die` of the earlier run. So the poll owns this detection: every poll applies rule 1, and it re-inspects containers still `restarting` after GRACE, because a retry that fails later is silent (E8, E9).
    - Split by cause. Do the matching in one place, backed by fixtures, because error strings vary by Engine version:
      - **Stale reference:**
        - `No such container` (`joining network namespace of container: No such container: <old id>`: the parent was recreated or removed) → recreate the dependent (skip restart; §3.5 gives the command). Restarting it cannot work (E1, E8e).
-       - `cannot join network namespace of a non running container` (the parent is stopped, not removed) → recreating the dependent cannot help until the parent runs. Heal the parent first (§3.5 already suppresses the dependent's ladder while the parent has an incident), then restart the dependent (E8e).
+       - `cannot join network namespace of a non running container` (the parent is stopped, not removed) → recreating the dependent cannot help until the parent runs. Heal the parent first (§3.5 already suppresses the dependent's ladder while the parent has an incident), then restart the dependent (E8e). **If the parent is left down by its policy** (a `restart: "no"` parent stopped by a host shutdown; rule 4), nothing heals it, so the dependent stays down too: no ladder, and one notification (§3.5).
        - `network ... not found` → recreate. Not reproduced in M0; kept from v3.
      - **Other** (missing bind-mount source, port already allocated, NFS or device not ready, command not executable): start first, then recreate. Strings seen in M0:
        - `failed to fulfil mount request: open <path>: no such file or directory` (bind source gone at restart; E8)
        - `invalid mount config for type "bind": bind source path does not exist: <path>` (at create, with `create_host_path: false`; also seen in the E6 negative control)
-       - `Bind for <addr> failed: port is already allocated` (E8d)
+       - `Bind for <addr> failed: port is already allocated` (E8d). `<addr>` is `0.0.0.0:<port>` or `:::<port>` (seen on the classic-store run) and may be `[::]:<port>`; match on the address-independent part, `port is already allocated`.
        - `exec: "<cmd>": stat <cmd>: no such file or directory` (E8c)
        - `exec: "<cmd>": permission denied` (E8c)
        - `stat <cmd>: not a directory` (E8c). Docker adds a misleading hint about mounting a directory onto a file; ignore it.
@@ -173,13 +189,20 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
      - 137 with `OOMKilled=true` is a crash, so heal;
      - 137 or 143 without OOM: notify only, don't heal.
    - **`always`:** heal any exited container.
+   - **A `restart: "no"` container stopped by a host shutdown** (killed by a daemon restart or reboot: exit 137 or 143, no `State.Error`; M0b `n-parent`) **respects its policy.** Docker does not restore it, and whalenurse does not either, in `crashed` and `never` modes: the shutdown kill is not a crash (see *Manual-stop markers*). Its `network_mode` dependents, which fail at boot with `cannot join network namespace of a non running container`, stay down with it: no ladder runs for them. whalenurse sends **one** notification per boot that names the parent and its dependents (deduplicated, not repeated every poll). With `heal-exited=always` the parent is started, and then its dependents are restarted (the heal-the-parent-first path of rule 1).
    - **`never`:** notify only.
 
 **Manual-stop markers:**
 - A marker is set on a `kill` event outside any in-flight window, and cleared on the next `start` event.
-- A daemon shutdown or reboot emits `kill` for every container. Docker's boot restart (a `start` event) clears those markers. Containers that fail to start at boot have `State.Error`, so rule 1 wins. Not run in M0; M0b runs it.
+- **A daemon shutdown or reboot sends `kill` to every running container** (M0b: 12 of 12 within 20ms at a daemon restart, `kill[15]` then `kill[9]`; at a reboot the observer is cut off after `kill[15]`, before any `stop` or `die`). Taken literally, the rules above would mark every container as manually stopped, and the `start` events of the restore would then clear SUSPENDED on all of them (§3.2). **Kills seen during a daemon shutdown or reboot must not set manual-stop markers or clear SUSPENDED.** Three mechanisms, all required:
+  - **(a) Quarantine on stream loss.** When the events stream ends for a reason other than whalenurse's own shutdown (EOF or an error), discard every marker created in the 30 s before the loss: the daemon's shutdown limit is 15 s, plus the stop timeouts. A real manual stop in that window is lost too. That container is then judged by rule 4 without evidence (137/143 without OOM: notify only), which is the safe outcome.
+  - **(b) Persist the boot id.** Store `/proc/sys/kernel/random/boot_id` with the markers. If it differs at startup, drop all markers and treat the first `STARTUP_SETTLE` as a restore window. A reboot stops whalenurse in the same second as the containers, so a marker can exist without any matching event in the next run.
+  - **(c) Restore window.** After connecting to a daemon that was down, until `STARTUP_SETTLE` has passed, a `start` event is a restore: it does not clear SUSPENDED, and a `kill` in the window does not set a marker.
+- **Rejected: recognising the shutdown by its burst of `kill[15]`** (two or more containers within a second, tagged as a shutdown). `docker compose stop` and `docker compose down` send the same burst, and so does stopping several containers by hand. A burst rule would label those deliberate stops as shutdowns, drop their markers, and heal the stopped containers. The stream loss in (a) and the boot id in (b) are the only reliable signals; do not add a burst heuristic.
+- Containers that fail to start at boot have `State.Error`, so rule 1 wins. The restored containers' markers never matter again, because the restore starts them.
+- A container stopped by hand before the shutdown (`unless-stopped`) stays down after the restore and keeps its marker; that case needs nothing.
 
-**Startup sweep:** after whalenurse starts (including at host boot), wait `STARTUP_SETTLE` (default 2m), then apply the rules to everything.
+**Startup sweep:** after whalenurse starts (including at host boot), and **after every reconnect that follows a lost events stream**, wait `STARTUP_SETTLE` (default 2m), then apply the rules to everything. Replay with `since=` does not replace it (see above).
 
 **Exit-code reading guide** (for M0, docs and the dashboard):
 
@@ -187,6 +210,7 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 |---|---|
 | 0 | Clean exit |
 | 126 / 127 / 128 + `State.Error`, status `created` | Failed **first** start (126 EACCES, 127 command not found / ENOTDIR, 128 anything else) |
+| 126 / 127 / 128 + `State.Error`, status `exited`, `RestartCount` unchanged | Failed **boot-time restore** (the code is mapped from the error, not the previous run's) |
 | any code + `State.Error`, status `exited` | Failed **restart** by the restart policy. The code is the previous run's, so don't read it; show `State.Error` |
 | 137 | SIGKILL: OOM if `OOMKilled`, otherwise `docker kill` or a stop that hit its timeout |
 | 143 | SIGTERM (usually a stop) |
@@ -207,7 +231,7 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
 2. The host plugin, mounted read-only at a fixed path (e.g. `/host/docker-compose`). The host path is typically `/usr/libexec/docker/cli-plugins/docker-compose`; `docker info` shows it. The compose plugin runs standalone.
 3. The bundled copy.
 
-Log which binary and version is in use at startup, and expose it in `/api/v1/status`. In systemd mode, use the host's `docker compose`.
+Log which binary and version is in use at startup, and expose it in `/api/v1/status`. Below Compose v5.2.0 (or Engine 28.1) rungs 2 and 3 are disabled (§3.6). In systemd mode, use the host's `docker compose`.
 
 **Command:**
 ```
@@ -247,7 +271,8 @@ Dependents break whenever their parent is restarted or recreated, by anything: D
   - the parent's `State.StartedAt` is newer than the dependent's.
 
   A stale dependent usually stays `running` with only a loopback interface (E1), so no state-based rule notices it. Only this sweep and the parent's `start`/`create` event find it.
-- **At boot:** Docker waits for `container:` network parents using a single shared 5s timer, so dependents can come up before their parent is ready. The startup sweep catches this. Source-checked only; M0b runs it.
+- **At boot** (confirmed in M0b after a daemon restart and a reboot): Docker restores a `container:` dependent after its parent, with the same network namespace, also behind a parent whose start takes longer than the 5s cap (8s; the dependent started after the parent's `start` event) and behind a parent that only becomes healthy 25s later (the daemon does not wait for readiness). A parent that is **not restored** (`restart: "no"`) or whose start fails takes its dependents down: they are attempted at once, fail with `cannot join network namespace of a non running container`, and are not retried. The "single shared 5s timer" covers a container's dependencies together, which with one `container:` parent is just a 5s cap. A dependent restored before its parent was not reproduced; the startup sweep stays as the backstop.
+- **A parent left down by policy leaves its dependents down** (`restart: "no"` parent stopped by a host shutdown, `heal-exited` not `always`; §3.3 rule 4): no ladder runs for the dependents, and one notification covers the parent and them.
 - **Ordering:** while a parent has an open incident or an in-flight action, suppress its dependents' ladders. Heal the parent first, wait for it to be healthy, then handle the dependents in order.
 - **Reverse case:** a dependent failing on its own never triggers an action on its parent.
 - **Compose behaviors to keep in mind:**
@@ -270,11 +295,16 @@ A recreate deploys whatever is on disk and in the local image store *now*. The g
      - Syntax: comma-separated service names, or `'*'` for all; commas are not trimmed. Output: one `<service> <hash>` line per service, sorted.
    - **Skip this check, oracle and hash both, for services whose `network_mode`/`ipc`/`pid`/`volumes_from` references another service or container.** Compose hashes those *after* resolving the reference to `container:<id>`, but `config --hash` hashes the unresolved form, so they never match, even on a freshly created container (E4: all four reference types; compose source: `execCreateContainer` → `resolveServiceReferences` → `ServiceHash`). The oracle reports `Recreate` for a dependent after its parent was recreated, which is expected rather than drift (E5). For these services, rely on checks 2–3 and on the parent's own check.
 2. **Image drift:**
-   - Compare the image the container runs with what its image reference resolves to locally now, using compose's `com.docker.compose.image` label, the digest compose recorded and uses for its own recreate decision.
+   - Compare the container's `com.docker.compose.image` label, the digest compose recorded and uses for its own recreate decision, with what the image reference resolves to locally now:
+     ```
+     docker image inspect --platform linux/<arch> --format '{{.Id}}' <ref>
+     ```
+     `<arch>` is the server's (`docker version --format '{{.Server.Arch}}'`). This is **one comparison that is correct on both image stores** (M0b, `test/m0/m0b/image-drift.sh`): it equals the label before a re-tag and differs after. On the containerd store the label is the platform manifest digest and `--platform … .Id` returns it; on the classic store the label is the image ID.
+   - **Never use `.Descriptor.digest`**, with or without `--platform`: it is empty on the classic store, so the guard would report drift for every container and SUSPEND them all. Never compare the label with plain `<ref>` `.Id`, with `.RepoDigests` or with the container's `.Image` either: on containerd those are index digests and never equal the label, and on classic plain `.Id` happens to work, which is the trap.
+   - If the inspect fails (the reference is no longer present locally, or has no image for that platform), that is a failure: skip the recreate and say why.
+   - **`image inspect --platform` needs Engine 28.1 or later** (API 1.49; docker/cli added the flag after v28.0.4, and the GitHub runner's Engine 28.0.4 answered `unknown flag: --platform` in the first CI run of the `image-drift` job). There is **no fallback and no store guessing** for older Engines: see *Minimum versions per rung* below.
    - The oracle already covers image drift for the services it checks. Run this explicit comparison for the services the oracle skips and whenever the hash fallback is used.
-   - Must be correct on both image stores. Fresh Engine v29 installs default to the containerd store.
-   - **Containerd store (E5):** the label is the *platform manifest digest*. Compare it with `docker image inspect --platform linux/<arch> <ref>` `.Descriptor.digest`. **Never compare with `.Id` or with the container's `.Image`:** those are the index digest, so they never equal the label, and every container would look drifted and be SUSPENDED.
-   - **Classic store:** to verify in M0b and CI. M0 did not test it.
+   - Fresh Engine v29 installs default to the containerd store, and a host that has run the classic store stays on it unless `containerd-snapshotter` is set explicitly. The CI `image-drift` job runs the check on both stores.
    - Allowed only for rung 3.
 3. **Compose version skew** (only when running the bundled compose fallback):
    - Compare the container's `com.docker.compose.version` label (present; `5.6.0` in the fixtures) with the bundled version.
@@ -285,6 +315,12 @@ A recreate deploys whatever is on disk and in the local image store *now*. The g
 - If whalenurse itself moved a shared tag (via rung 3 on another service), the message says which service did it and when.
 
 **Strictness:** `WHALENURSE_DRIFT_GUARD=strict|warn` (default `strict`). `warn` recreates anyway and says so.
+
+**Minimum versions per rung** (decided 17 Oct 2026, after the first CI run of the M0b `image-drift` job):
+- **Rung 1 (restart, Docker API only) works from Engine v25**, the minimum for whalenurse as a whole.
+- **Rungs 2 and 3 (recreate, pull) and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0**, the oldest compose in the CI matrix (§6). Engine 28.1 is the first with `image inspect --platform` (§3.6 check 2); the dry-run oracle's output is pinned by the compose matrix (on the runner's compose 2.38.2 it printed `null` instead of JSON lines).
+- **whalenurse checks both at startup** (the Engine version from the API, the compose version of the binary chosen in §3.4). If either is below the minimum it logs **one warning** that names the versions, **disables rungs 2 and 3** for every container, and the ladder ends after rung 1 with notify + SUSPENDED, as if `whalenurse.actions=restart` were set. The same applies per container when its labels select rungs that are disabled. Status and the dashboard show the disabled rungs and the reason.
+- **No store-guessing fallback.** Plain `<ref>` `.Id` equals the label on the classic store but not on the containerd store, and guessing the store is how the guard would flag or miss drift silently. Below the minimum, the guard does not run at all, and neither does the recreate it protects.
 
 ### 3.7 Pull rung (opt-in, `whalenurse.heal.pull=true`)
 
@@ -382,6 +418,8 @@ Initial defaults; tune them after M0.
 
 **CLI:** `whalenurse run` (default), `pause`, `resume`, `unsuspend`, `status`.
 
+**Version minimums (fixed, not configurable):** Engine v25 for rung 1 (restart). Rungs 2 and 3 and the drift guard need Engine ≥ 28.1 and Compose ≥ v5.2.0. whalenurse checks them at startup, logs one warning if either is lower, disables rungs 2 and 3, and ends the ladder with notify + SUSPENDED after rung 1 (§3.6). `WHALENURSE_DRIFT_GUARD=warn` does not bypass this: below the minimum there is no recreate to guard.
+
 ## 5. Architecture and dependencies
 
 ```
@@ -402,7 +440,7 @@ internal/config/     env + label parsing
 
 **Dependencies** (check the latest version at implementation time):
 - **`github.com/moby/moby/client` + `/api`.** The client was at v0.6.2 on 8 Oct 2026. It is pre-1.0, so minor versions can break; keep it behind `internal/docker`. API negotiation is the default (`WithAPIVersionNegotiation` is deprecated), and `Events()` returns a single `EventsResult`.
-- **Minimum Docker Engine v25.** Engine v29 rejects API versions below 1.44.
+- **Minimum Docker Engine v25** for rung 1 (restart). Engine v29 rejects API versions below 1.44. Rungs 2 and 3 and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0 (§3.6).
 - **`modernc.org/sqlite`.**
 - **`github.com/nicholas-fedor/shoutrrr`.** Was at v0.17.0 in Aug 2026; vet it in M3.
 - No cron library in v1. If R4 needs one, `robfig/cron` is unmaintained (last release Jan 2020); use `go-co-op/gocron/v2` or a cron-expression parser plus your own timer.
@@ -416,11 +454,19 @@ internal/config/     env + label parsing
 - pause and pause expiry;
 - the action-in-flight window suppresses interpretation;
 - a manual stop is ignored;
-- daemon-shutdown kill markers are cleared on start;
+- shutdown kills (M0b fixtures `m0b-daemon-restart-shutdown` and `m0b-reboot-shutdown`):
+  - markers created in the 30 s before an events-stream loss are discarded, and an older real manual stop survives;
+  - a changed boot id drops all markers and opens a restore window;
+  - a `start` inside a restore window, or after a quarantined kill, does not clear SUSPENDED, and a SUSPENDED container killed by a shutdown and restored stays SUSPENDED;
+  - negative test for the rejected burst rule: the same `kill[15]` burst with the events stream still up (`docker compose stop`) keeps its markers and the containers stay stopped;
+  - a `restart: "no"` parent stopped by a shutdown and its dependents stay down with one notification, and `heal-exited=always` starts the parent and then the dependents;
 - `on-failure` + exit 0 is left alone;
 - oneoff containers and swarm tasks are skipped;
 - OOM 137 vs stop 137;
-- failed first start (`created` + 126/127/128 + `State.Error`) and failed restart (`exited` + previous exit code + `State.Error`), both classified by `State.Error` alone;
+- failed first start (`created` + 126/127/128 + `State.Error`), failed restart (`exited` + previous exit code + `State.Error`) and failed boot-time restore (`exited` + 127 + `State.Error`, `RestartCount` 0), all classified by `State.Error` alone;
+- the port-conflict matcher accepts `Bind for 0.0.0.0:80`, `Bind for :::80` and `Bind for [::]:80`;
+- an API error or a closed stream while the daemon restores is "not ready" and opens no incident, and the sweep runs after the reconnect;
+- the startup version check: Engine below 28.1 or compose below v5.2.0 logs one warning, disables rungs 2 and 3, and an unhealthy container ends at notify + SUSPENDED after rung 1; with both at the minimum nothing is disabled;
 - stale-reference classification: `No such container` → recreate; `cannot join network namespace of a non running container` → heal the parent first, then restart the dependent;
 - a container still `restarting` after GRACE is re-inspected by the poll;
 - dependents are suppressed while the parent's incident is open.
@@ -434,13 +480,13 @@ internal/config/     env + label parsing
 - toggled healthcheck → restart, then recreate, then SUSPENDED;
 - heal never pulls (a service with `pull_policy: always`);
 - the config-drift guard blocks a recreate after a compose edit;
-- the image-drift guard blocks a recreate after a re-tag;
+- the image-drift guard blocks a recreate after a re-tag, and does not block an unchanged container, on both image stores (the comparator of §3.6);
 - a ref-holding dependent skips the hash check and is recreated after its parent is;
 - notifications reach a local webhook receiver;
 - dry-run performs no actions;
 - the pull rung, against a local `registry:2`.
 
-**CI matrix:** latest Docker Engine on both the classic and the containerd image store, crossed with three compose versions:
+**CI matrix:** latest Docker Engine on both the classic and the containerd image store, crossed with three compose versions. The `image-drift` job (`test/m0/m0b/image-drift.sh`) runs on both stores today:
 - **v5.6.0**, the version M0 ran on;
 - **the latest release**, floating. It is v5.6.0 today, so the two jobs coincide until a newer release;
 - **v5.2.0**, the only release with compose bug #13878. v5.3.0 (2 Jul 2026) contains the fix, and v5.2.0 (23 Jun) is the only release before the fix (29 Jun). It exercises recreate-on-every-`up` for sidecars, config-hash and dry-run output across versions, and the version-skew check (§3.6).
@@ -495,7 +541,7 @@ internal/config/     env + label parsing
 
 ### M0b — Scenarios M0 could not run (no app code; after M1, must finish before M2)
 
-M0 ran on a VM where the daemon could not be restarted and the journal was not readable (findings §6). M0b closes those gaps. It extends `test/m0` and `scripts/m0`; the safety rules of §0 apply unchanged, and it needs the maintainer's confirmation of the host.
+M0 ran on a VM where the daemon could not be restarted and the journal was not readable (findings §6). M0b closes those gaps; its results and the proposed §3 changes are in [m0b-findings.md](m0b-findings.md). The scripts are in `test/m0/m0b/` (prepare, maintainer step, collect). It extends `test/m0` and `scripts/m0`; the safety rules of §0 apply unchanged, and it needs the maintainer's confirmation of the host.
 
 - **[maintainer]** Daemon restart and host reboot (E9's last scenario) on the throwaway VM. Record:
   - the shutdown `kill` events and how the manual-stop markers (§3.3) clear on Docker's boot restart;
@@ -504,7 +550,8 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 - **[maintainer]** Journal evidence: run `scripts/m0/capture.sh` on a host where `journalctl -u docker` is readable, and confirm `failed to start container` and `restartmanger wait error` appear for E8 and for boot-time restore.
 - **Classic image store:** switch the VM's `daemon.json` to the classic store (**[maintainer]**: needs a daemon restart), and run E5's image-drift part, ideally all of `run.sh`. Confirm what `com.docker.compose.image` holds there (§3.6). CI covers this too, so write the check so that CI can run it.
 - **Engine 29.9.1** (containerd 2.4.2): upgrade the VM (**[maintainer]**: restarts the daemon) and re-run the suite. Findings §1 found no change in 29.9.1 that touches any experiment, so expect no differences.
-- **Done when:** each item has an answer with scrubbed evidence in `docs/m0-findings.md` (a new section) and fixtures in `testdata/`, and §3.3, §3.5 and §3.6 are each marked "confirmed" or "needs change" for what M0b tested. Report anything that contradicts a plan rule before M2 starts.
+- **Done (17 Oct 2026):** the verdicts were approved and are in this plan as v3.3. The CI `image-drift` job (it installs Engine 29.x and compose 5.6.0, because the runner's Engine 28.0.4 has no `image inspect --platform`) and the M0b self-test are in `ci.yml`.
+- **Done when:** each item has an answer with scrubbed evidence in [m0b-findings.md](m0b-findings.md) (a separate file, not a section of `m0-findings.md`) and fixtures in `testdata/`, and §3.3, §3.5 and §3.6 are each marked "confirmed" or "needs change" for what M0b tested. Report anything that contradicts a plan rule before M2 starts.
 
 ### M2 — Compose recreate, escalation and persistence
 - `internal/compose`: binary lookup (§3.4), command builder, the dry-run oracle with its `config --hash` fallback (§3.6).
@@ -512,7 +559,10 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 - SQLite store; control socket and CLI (pause/resume/unsuspend/status).
 - `State.Error` classification and the `heal-exited` modes; manual-stop markers.
 - Drift guard (§3.6), including the ref-holding skip.
-- Dependents (§3.5): discovery, ordering, staleness sweep, the remedy mapping (recreate via non-forced `up` when the parent ID is gone, API restart otherwise), and the "needs recreate (M2)" cases M1 only logs.
+- Dependents (§3.5): discovery, ordering, staleness sweep, the remedy mapping (recreate via non-forced `up` when the parent ID is gone, API restart otherwise), and the "needs recreate (M2)" cases M1 only logs. A parent left down by policy leaves its dependents down (one notification).
+- Shutdown handling (§3.3, *Manual-stop markers*): quarantine on stream loss, persisted boot id, restore window, the sweep after every reconnect, "daemon not ready" for API errors during a restore. M1's tracker still reads a shutdown as manual stops (pinned in `rules_test.go`, `multiKeyEventVerdicts`); M2 changes that expectation on purpose.
+- The startup version check and the per-rung minimums of §3.6 (one warning, rungs 2 and 3 disabled, ladder ends at notify + SUSPENDED after rung 1).
+- Rule 1's third shape and the address-independent port matcher (M1's matcher already ignores the address); the image-drift comparator of §3.6.
 - **Done when:** the M2 integration tests in §6 pass, and state survives a whalenurse restart.
 
 ### M3 — Notifications
@@ -555,6 +605,7 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 5. ~~Does compose recreate dependents on a non-forced `up`?~~ **Answered:** yes after a parent recreate, no after a parent restart (E2). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9).
 6. Final defaults for grace, cooldown, crash-loop and rate limits (after M0).
 7. Confirm SQLite at the start of M2.
+8. ~~Image drift on Engines older than 28.1, and compose versions older than the matrix?~~ **Answered (17 Oct 2026):** rung 1 keeps Engine v25 as the minimum. Rungs 2 and 3 and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0. whalenurse checks both at startup; below that it logs one warning, disables rungs 2 and 3, and the ladder ends with notify + SUSPENDED after rung 1. No store-guessing fallback. See §3.6, *Minimum versions per rung*.
 
 ---
 
@@ -592,7 +643,7 @@ whalenurse needs access to the Docker socket, which is root-equivalent on the ho
 
 ## Requirements (planned)
 
-- Docker Engine v25 or later
+- Docker Engine v25 or later (restart only); Engine 28.1 or later and Compose v5.2.0 or later for recreate, pull and the drift guard
 - The Docker Compose plugin on the host
 - Compose stacks in plain directories on the host
 

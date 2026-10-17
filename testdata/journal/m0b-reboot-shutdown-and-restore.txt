@@ -1,0 +1,7 @@
+Oct 17 16:58:38.364082 <hostname> dockerd[2110706]: time="2026-10-17T16:58:38.363971372+02:00" level=info msg="Processing signal 'terminated'"
+Oct 17 16:58:50.447549 <hostname> dockerd[2110706]: time="2026-10-17T16:58:50.447424577+02:00" level=warning msg="Container failed to exit within 10s of kill - trying direct SIGKILL" container=d1320684a53ff77ffe91049c9f2d9939d0e5cb8eea8802bcc74fb24e0e877642 error="context deadline exceeded"
+Oct 17 16:58:53.365382 <hostname> dockerd[2110706]: time="2026-10-17T16:58:53.365326631+02:00" level=error msg="Force shutdown daemon"
+Oct 17 16:58:53.377902 <hostname> dockerd[2110706]: time="2026-10-17T16:58:53.377860151+02:00" level=info msg="Daemon shutdown complete"
+Oct 17 16:59:16.535970 <hostname> dockerd[865]: time="2026-10-17T16:59:16.535827365+02:00" level=error msg="error unmounting container" container=d1320684a53ff77ffe91049c9f2d9939d0e5cb8eea8802bcc74fb24e0e877642 error="layer not mounted"
+Oct 17 16:59:58.552353 <hostname> dockerd[865]: time="2026-10-17T16:59:58.552298545+02:00" level=info msg="Loading containers: done."
+Oct 17 16:59:58.622350 <hostname> dockerd[865]: time="2026-10-17T16:59:58.622298913+02:00" level=info msg="Daemon has completed initialization"

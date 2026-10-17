@@ -59,6 +59,7 @@ jobs:
           scripts/m0/selftest.sh
           scripts/scrub-fixture --self-test
           test/m0/run.sh selftest
+          test/m0/m0b/selftest.sh
 
   integration:
     name: integration (real Docker, whalenurse-test-* projects only)
@@ -85,3 +86,39 @@ jobs:
       - name: Leftover test projects (should be empty)
         if: always()
         run: docker ps -a --filter label=com.docker.compose.project --format '{{.Names}} {{.Label "com.docker.compose.project"}}' | grep whalenurse-test- || true
+
+  image-drift:
+    name: image-drift check (${{ matrix.store }} store)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [classic, containerd]
+    steps:
+      - uses: actions/checkout@v7
+      # The runner ships Engine 28.0.4 and compose 2.38.x. `docker image inspect --platform` needs Engine 28.1 or later
+      # and the dry-run oracle is pinned to compose v5.x (plan section 6), so install what the plan's matrix names.
+      - name: Install the latest Docker Engine 29.x and Compose 5.6.0
+        run: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker-m0b.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker-m0b.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker-m0b.list
+          sudo apt-get update
+          sudo apt-get install -y --allow-change-held-packages --allow-downgrades docker-ce='5:29.*' docker-ce-cli='5:29.*' containerd.io docker-compose-plugin='5.6.0*'
+          docker version --format 'engine {{.Server.Version}} (API {{.Server.APIVersion}})'
+          docker compose version
+      - name: Select the image store and restart Docker
+        run: |
+          if [ "${{ matrix.store }}" = containerd ]; then
+            echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json
+          else
+            echo '{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}' | sudo tee /etc/docker/daemon.json
+          fi
+          sudo systemctl restart docker
+          docker info --format 'storage driver: {{.Driver}} / {{json .DriverStatus}}'
+      - name: Image drift (M0b scenario 5; whalenurse-m0-b-imgdrift project only)
+        run: test/m0/m0b/image-drift.sh --out "$RUNNER_TEMP/imgdrift-${{ matrix.store }}"
+      - name: Summary
+        if: always()
+        run: cat "$RUNNER_TEMP/imgdrift-${{ matrix.store }}/summary.txt" || true

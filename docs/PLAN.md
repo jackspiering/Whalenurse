@@ -95,7 +95,7 @@ Prior art (checked 16 Oct 2026):
 | Compose binary (container mode) | **Host's compose plugin mounted `:ro` first; bundled copy as fallback** |
 | Docker Go client | `github.com/moby/moby/client` + `github.com/moby/moby/api` (`github.com/docker/docker` no longer gets updates as of Engine v29) |
 | Notifications | Shoutrrr; leaning `nicholas-fedor/shoutrrr` (vet in M3) |
-| Store | SQLite via `modernc.org/sqlite` (recommended in review; confirm at M2a) |
+| Store | SQLite via `modernc.org/sqlite` (recommended in review; confirmed in M2a, v1.60.1) |
 | Dashboard | Read-only, off by default, built on a versioned JSON API; default port 8484 |
 | Control in v1 | CLI over a local unix socket (pause/resume/unsuspend/status). No network-exposed write endpoints |
 | Multi-server | Post-v1 hub (R1). v1 already carries a host ID in every key, event and API record |
@@ -627,7 +627,7 @@ Rung 2 does not exist yet. Where the ladder would recreate, it records "needs re
 4. ~~Should the dry-run plan replace the config-hash check?~~ **Answered:** it is the primary check for non-reference services and parents, with `config --hash` as the fallback (§3.6). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9) and [E5](m0-findings.md#e5---dry-run-as-the-recreate-oracle).
 5. ~~Does compose recreate dependents on a non-forced `up`?~~ **Answered:** yes after a parent recreate, no after a parent restart (E2). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9).
 6. Final defaults for grace, cooldown, crash-loop and rate limits (after M0).
-7. Confirm SQLite at the start of M2a.
+7. ~~Confirm SQLite at the start of M2a.~~ **Answered (17 Oct 2026):** `modernc.org/sqlite` v1.60.1 (29 Sep 2026, `go 1.26.0`; pure Go, so the `CGO_ENABLED=0` build holds; about 19 MB binary). See [m2a-notes.md](m2a-notes.md).
 8. ~~Image drift on Engines older than 28.1, and compose versions older than the matrix?~~ **Answered (17 Oct 2026):** rung 1 keeps Engine v25 as the minimum. Rungs 2 and 3 and the drift guard require Engine ≥ 28.1 and Compose ≥ v5.2.0. whalenurse checks both at startup; below that it logs one warning, disables rungs 2 and 3, and the ladder ends with notify + SUSPENDED after rung 1. No store-guessing fallback. See §3.6, *Minimum versions per rung*.
 
 ---

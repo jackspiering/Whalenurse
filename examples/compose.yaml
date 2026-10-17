@@ -1,4 +1,4 @@
-# whalenurse M1: restart-only healing. Replace GID with the group of the Docker socket:
+# whalenurse M2a: restart, SUSPENDED after one pass, pause/unsuspend through `docker exec whalenurse /whalenurse ...`. Replace GID with the group of the Docker socket:
 #   stat -c %g /var/run/docker.sock
 services:
   whalenurse:
@@ -13,10 +13,14 @@ services:
     volumes:
       # Root-equivalent access to the host. Read docs/running.md.
       - /var/run/docker.sock:/var/run/docker.sock
+      - whalenurse-data:/data # the state store; the image makes /data writable for the nonroot user
     environment:
       WHALENURSE_DRY_RUN: "true" # log decisions only; remove once they look right
 
-  # An opted-in container: whalenurse restarts it when it turns unhealthy.
+  # An opted-in container: whalenurse restarts it when it turns unhealthy, and suspends it if that does not help.
   # example:
   #   labels:
   #     whalenurse.enable: "true"
+
+volumes:
+  whalenurse-data: {}

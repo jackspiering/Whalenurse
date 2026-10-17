@@ -301,6 +301,7 @@ A recreate deploys whatever is on disk and in the local image store *now*. The g
      `<arch>` is the server's (`docker version --format '{{.Server.Arch}}'`). This is **one comparison that is correct on both image stores** (M0b, `test/m0/m0b/image-drift.sh`): it equals the label before a re-tag and differs after. On the containerd store the label is the platform manifest digest and `--platform … .Id` returns it; on the classic store the label is the image ID.
    - **Never use `.Descriptor.digest`**, with or without `--platform`: it is empty on the classic store, so the guard would report drift for every container and SUSPEND them all. Never compare the label with plain `<ref>` `.Id`, with `.RepoDigests` or with the container's `.Image` either: on containerd those are index digests and never equal the label, and on classic plain `.Id` happens to work, which is the trap.
    - If the inspect fails (the reference is no longer present locally, or has no image for that platform), that is a failure: skip the recreate and say why.
+   - **`image inspect --platform` needs Engine 28.1 or later** (API 1.49; docker/cli added the flag after v28.0.4, and the GitHub runner's Engine 28.0.4 answered `unknown flag: --platform` in the first CI run of the `image-drift` job). The plan's minimum is Engine v25, so what to do on Engines older than 28.1 is **open** (§9 question 8).
    - The oracle already covers image drift for the services it checks. Run this explicit comparison for the services the oracle skips and whenever the hash fallback is used.
    - Fresh Engine v29 installs default to the containerd store, and a host that has run the classic store stays on it unless `containerd-snapshotter` is set explicitly. The CI `image-drift` job runs the check on both stores.
    - Allowed only for rung 3.
@@ -539,7 +540,7 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 - **[maintainer]** Journal evidence: run `scripts/m0/capture.sh` on a host where `journalctl -u docker` is readable, and confirm `failed to start container` and `restartmanger wait error` appear for E8 and for boot-time restore.
 - **Classic image store:** switch the VM's `daemon.json` to the classic store (**[maintainer]**: needs a daemon restart), and run E5's image-drift part, ideally all of `run.sh`. Confirm what `com.docker.compose.image` holds there (§3.6). CI covers this too, so write the check so that CI can run it.
 - **Engine 29.9.1** (containerd 2.4.2): upgrade the VM (**[maintainer]**: restarts the daemon) and re-run the suite. Findings §1 found no change in 29.9.1 that touches any experiment, so expect no differences.
-- **Done (17 Oct 2026):** the verdicts were approved and are in this plan as v3.3. The CI `image-drift` job and the M0b self-test are in `ci.yml`.
+- **Done (17 Oct 2026):** the verdicts were approved and are in this plan as v3.3. The CI `image-drift` job (it installs Engine 29.x and compose 5.6.0, because the runner's Engine 28.0.4 has no `image inspect --platform`) and the M0b self-test are in `ci.yml`.
 - **Done when:** each item has an answer with scrubbed evidence in [m0b-findings.md](m0b-findings.md) (a separate file, not a section of `m0-findings.md`) and fixtures in `testdata/`, and §3.3, §3.5 and §3.6 are each marked "confirmed" or "needs change" for what M0b tested. Report anything that contradicts a plan rule before M2 starts.
 
 ### M2 — Compose recreate, escalation and persistence
@@ -593,6 +594,7 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 5. ~~Does compose recreate dependents on a non-forced `up`?~~ **Answered:** yes after a parent recreate, no after a parent restart (E2). See [findings §5](m0-findings.md#5-answers-to-the-plans-open-questions-9).
 6. Final defaults for grace, cooldown, crash-loop and rate limits (after M0).
 7. Confirm SQLite at the start of M2.
+8. **Image drift on Engines older than 28.1** (no `image inspect --platform`) and on compose versions older than the matrix (on the runner's compose 2.38.2 the dry-run oracle printed `null` instead of the JSON lines). Plain `<ref>` `.Id` equals the label on the classic store but not on the containerd store, so a fallback is store-dependent. Decide before M2 implements §3.6: either raise the minimum Engine for the drift guard, or define the fallback (for example the oracle only, plus `.Id` on the classic store).
 
 ---
 

@@ -1,7 +1,13 @@
-# whalenurse — implementation plan v3.1
+# whalenurse — implementation plan v3.2
 
-Status: v3.1, approved for implementation. It is v3 plus the M0 verdicts ([m0-findings.md](m0-findings.md) §4), which the maintainer approved on 17 Oct 2026. Supersedes v3. Facts and versions are as of 17 Oct 2026 (16 Oct for the prior-art survey).
+Status: v3.2, approved for implementation. It is v3.1 plus the two M1 verdicts ([m1-notes.md](m1-notes.md) decisions 2 and 11), which the maintainer approved on 17 Oct 2026. v3.1 was v3 plus the M0 verdicts ([m0-findings.md](m0-findings.md) §4). Supersedes v3.1. Facts and versions are as of 17 Oct 2026 (16 Oct for the prior-art survey).
 Repo: `github.com/jackspiering/whalenurse` (Go module path, GHCR image and binary are all lowercase).
+
+**Changes in v3.2** (from the M1 review of PR #5):
+- §3.2: SUSPENDED clears on recovery, on an external `create`, or on a `start` that follows a manual-stop marker. A restart-policy `start` never clears it, because it would re-arm the ladder on every cycle of a loop.
+- §3.3 rule 3: a crash loop is signalled by `RestartCount` rises and `die` events, not by `restarting`. The restart manager resets its backoff after a 10s run (moby `restartmanager.go` at docker-v29.9.1), so a loop that crashes every ~15s is almost always `running`. M2 defines the rule independent of how often whalenurse inspects.
+- §7 M2: the ladder bullet carries the new loop rule and the recovery period for it.
+- M1 keeps its simpler implementation (see [m1-notes.md](m1-notes.md) decision 11); M2 replaces it.
 
 **Changes in v3.1** (E-numbers are the M0 experiments in [m0-findings.md](m0-findings.md) §3):
 - §3.3: the event-order example is `kill`, `stop`, `die`, and it differs between operations and Engine versions (E9).
@@ -112,7 +118,8 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
   - open a new incident.
 - **SUSPENDED clears** when:
   - the container returns to healthy;
-  - an external `start`/`create` arrives outside any in-flight window;
+  - an external `create` arrives outside any in-flight window;
+  - a `start` arrives outside any in-flight window **and follows a manual-stop marker** (someone stopped it, someone started it). A `start` by the restart policy never clears SUSPENDED: it is also a `start` event, and clearing on it would re-arm the ladder on every cycle of a crash loop;
   - someone runs `whalenurse unsuspend`.
 - **Pause:**
   - Syntax: `whalenurse pause <project>[/<service>] [--for 2h]` and `whalenurse resume ...`, run via `docker exec`. The CLI talks to the daemon over a unix socket.
@@ -156,7 +163,9 @@ any state --(pause)--> PAUSED (no actions; events recorded) --(resume / expiry)-
        - `exec: "<cmd>": permission denied` (E8c)
        - `stat <cmd>: not a directory` (E8c). Docker adds a misleading hint about mounting a directory onto a file; ignore it.
 2. `running` + `unhealthy` → ladder.
-3. `restarting` for longer than `CRASHLOOP_AFTER` (default 5m), or `on-failure:N` exhausted → ladder. (A container still `restarting` after GRACE is re-inspected on each poll; rule 1 applies when it fails.) A container that was `created` but never started → recreate.
+3. A **crash loop**, or `on-failure:N` exhausted → ladder. (A container still `restarting` after GRACE is re-inspected on each poll; rule 1 applies when it fails.) A container that was `created` but never started → recreate.
+   - **Crash loop:** at least 3 `RestartCount` increases, the first at least `CRASHLOOP_AFTER` (default 5m) ago. `RestartCount` and `die` events are the signal, not the `restarting` status: the engine's restart manager resets its backoff after a run of 10s or more, so a container that crashes every ~15s is almost always `running` when inspected, and a rule that needs `restarting` never fires. The rule must give the same answer however often whalenurse inspects, so it counts increases between inspects rather than comparing two snapshots. The loop clears after `RECOVERY_PERIOD` (default 10m) without an increase.
+   - M1 ships a simpler form: the clock starts on `restarting` or a rising `RestartCount` and clears after GRACE of a steady count ([m1-notes.md](m1-notes.md) decision 11). M2 replaces it with the rule above.
 4. `exited` with no `State.Error` → apply `whalenurse.heal-exited` (`crashed` | `always` | `never`; default `crashed`):
    - **Intended exit:** with restart policy `no` or `on-failure` and exit code 0, the exit was intended. Leave it alone in `crashed` and `never` modes.
    - **`crashed`:** heal if whalenurse saw a `die` **without a preceding `kill`**, or `OOMKilled=true` (also watch the `oom` event). If whalenurse missed the events (it was down):
@@ -499,7 +508,7 @@ M0 ran on a VM where the daemon could not be restarted and the journal was not r
 
 ### M2 — Compose recreate, escalation and persistence
 - `internal/compose`: binary lookup (§3.4), command builder, the dry-run oracle with its `config --hash` fallback (§3.6).
-- The full ladder: cooldown backoff, recovery period, flap limit, SUSPENDED, PAUSED.
+- The full ladder: cooldown backoff, recovery period, flap limit, SUSPENDED, PAUSED. Crash-loop detection by the §3.3 rule 3 definition (≥3 `RestartCount` increases, the first ≥ `CRASHLOOP_AFTER` ago, cleared after `RECOVERY_PERIOD` without one), independent of the inspect rate, with a test that varies the poll interval and `GRACE`. SUSPENDED clears as in §3.2.
 - SQLite store; control socket and CLI (pause/resume/unsuspend/status).
 - `State.Error` classification and the `heal-exited` modes; manual-stop markers.
 - Drift guard (§3.6), including the ref-holding skip.
